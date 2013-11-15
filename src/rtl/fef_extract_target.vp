@@ -1,0 +1,399 @@
+////////////////////////////////////////////////////////////////
+// fef_extract_target.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Generate the target addresses for field extraction
+//   Performs merging of the various input extract values
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use ParserJSONImport;
+//; use List::Util;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = calcExtractTables();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//;
+//; my $destBits = log2($totalExtractBytes);
+//; my $tableDepthBits = log2($totalExtractEntries);
+//;
+//; my $numHeaders = numHeaders();
+//;
+//; my $offsetBits = log2($wordByteWidth);
+//; my $extEntryWidthBits = log2($wordByteWidth + 1);
+//;
+//; # FIXME: This should probably be a function
+//; my $totalHeaders = $numHeaders + 1;
+//; my $hdrCntWidth = POSIX::ceil(log($totalHeaders) / log(2));
+
+
+
+//;
+//; my $foundCntWidth = log2($maxParserSeqLen + 1);
+
+
+import parser_pkg::*;
+
+module `mname()`
+(
+    // Packet buffer interface
+    input logic                             pkt_buf_rd_en,
+    input logic                             pkt_buf_empty,
+
+    // Buffer state machine interface
+    input logic [HDR_WIDTH-1:0]             curr_pos,
+    input logic [`$offsetBits-1` : 0]       curr_offset,
+    input logic                             pkt_done,
+
+    input logic [0:`$maxParserSeqLen-1`]    found_in_curr,
+    input logic                             any_found_in_curr,
+    input logic [`$foundCntWidth-1`:0]      last_found_in_curr,
+
+    // Found header buffer interface
+    input logic [0:`$maxParserSeqLen-1`]                found_hdr_buf_vld,
+    input hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_buf_type,
+    input logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_buf_pos,
+
+    // Extract ROM interface
+    input logic[-1:`$maxParserSeqLen-1`][0:`$wordByteWidth-1`][`$destBits-1`:0] extract_target_in,
+    input logic[-1:`$maxParserSeqLen-1`][`$tableDepthBits-1`:0]     curr_extract_rd_addr,
+
+    // Output
+    output logic [0:`$wordByteWidth-1`][`$destBits-1`:0]            extract_target_out,
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+const logic [`$tableDepthBits-1`:0] HDR_DONE = 0;
+
+
+logic [`$destBits-1`:0]         curr_target_offset;
+logic [`$destBits-1`:0]         curr_target_offset_nxt;
+
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] prev_extract_target_offset;
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] prev_extract_target_offset_nxt;
+
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] prev_extract_target;
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] prev_extract_target_nxt;
+
+logic [-1:`$maxParserSeqLen-1`][0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_shifted;
+
+logic [0:`$maxParserSeqLen-1`][`$offsetBits-1` : 0]     found_target_offset;
+
+logic [-1:`$maxParserSeqLen-1`][0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_mask;
+logic [-1:`$maxParserSeqLen-1`][0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_masked;
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_merged;
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_merged_plus_prev;
+
+logic [-1:`$maxParserSeqLen-1`][`$destBits-1`:0]    extract_offset;
+logic [0:`$maxParserSeqLen-1`]                      update_hdr_cnt;
+
+logic [-1:`$maxParserSeqLen-1`][0:`$wordByteWidth-1`][`$destBits-1`:0]  extract_target_offset;
+logic [-1:`$maxParserSeqLen-1`][0:`2*$wordByteWidth-1`][`$destBits-1`:0]extract_target_offset_shifted;
+logic [-1:`$maxParserSeqLen-1`][0:`2*$wordByteWidth-1`][`$destBits-1`:0]extract_target_offset_masked;
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_offset_merged;
+logic [0:`2*$wordByteWidth-1`][`$destBits-1`:0] extract_target_offset_merged_plus_prev;
+
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0]   extract_target_internal;
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0]   extract_target_offset_internal;
+
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0]   extract_target_d1;
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0]   extract_target_offset_d1;
+
+////////////////////////////////////////
+// Instantiations
+////////////////////////////////////////
+
+// Target shifters for each output
+//; my @targetShifters;
+//; for (my $i = -1; $i < $maxParserSeqLen; $i++) {
+//;     push @targetShifters, generate('shifter', "extract_shifter_" . ($i+2),
+//;                         InputWidth => $wordByteWidth * $destBits,
+//;                         OutputWidth => $wordByteWidth * 2 * $destBits,
+//;                         ShiftDir => 'right',
+//;                         ShiftMult => $destBits,
+//;                         ShiftBits => $offsetBits,
+//;                         MaxShiftAmt => $wordByteWidth - 1);
+//;
+`$targetShifters[-1]->instantiate()`
+    (
+        //Input Signals
+        .in_data (extract_target_in[`$i`]),
+//;         if ($i == -1) {
+        .shift_amt (curr_offset),
+//;         } else {
+        .shift_amt (found_target_offset[`$i`]),
+//;         }
+
+        //Output Signals
+        //.out_data ({extract_target_shifted_new[`$i`], extract_target_shifted_overflow[`$i`]})
+        .out_data (extract_target_shifted[`$i`])
+    );
+
+//; }
+
+
+// Target offset shifters for each output
+//; my @offsetShifters;
+//; for (my $i = -1; $i < $maxParserSeqLen; $i++) {
+//;     push @offsetShifters, generate('shifter', "extract_offset_shifter_" . ($i+2),
+//;                         InputWidth => $wordByteWidth * $destBits,
+//;                         OutputWidth => $wordByteWidth * 2 * $destBits,
+//;                         ShiftDir => 'right',
+//;                         ShiftMult => $destBits,
+//;                         ShiftBits => $offsetBits,
+//;                         MaxShiftAmt => $wordByteWidth - 1);
+//;
+`$offsetShifters[-1]->instantiate()`
+    (
+        //Input Signals
+        .in_data (extract_target_offset[`$i`]),
+//;         if ($i == -1) {
+        .shift_amt (curr_offset),
+//;         } else {
+        .shift_amt (found_target_offset[`$i`]),
+//;         }
+
+        //Output Signals
+        //.out_data ({extract_target_shifted_new[`$i`], extract_target_shifted_overflow[`$i`]})
+        .out_data (extract_target_offset_shifted[`$i`])
+    );
+
+//; }
+
+
+// Header counters/offsets
+//; my $hdrCounter = generate('fef_hdr_cntr', 'fef_hdr_cntr',
+//;                             WordWidth => $wordByteWidth,
+//;                             Debug => $debug,);
+`$hdrCounter->instantiate()` (
+    .update_hdr_cnt (update_hdr_cnt),
+    .pkt_done (pkt_done),
+
+    // Found header buffer interface
+    .found_hdr_buf_type (found_hdr_buf_type),
+
+    // Output
+    .extract_offset (extract_offset[0:`$maxParserSeqLen-1`]),
+
+    //Global Signals
+    .clk        (clk),
+    .rst        (rst)
+);
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+// Generate the extract target addresses
+assign extract_target_merged_plus_prev = extract_target_merged | prev_extract_target;
+assign extract_target_internal = extract_target_merged_plus_prev[0:`$wordByteWidth-1`];
+
+
+// Mask out each of the input extract target values
+assign extract_target_mask[-1] = '1; 
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+assign extract_target_mask[`$i`] = found_in_curr[`$i`] ? '1 : '0;
+//; }
+
+always_comb
+begin
+    foreach (extract_target_masked[i])
+        extract_target_masked[i] = extract_target_shifted[i] & extract_target_mask[i];
+end
+
+
+// Merge the extract targets
+//; print "assign extract_target_merged = ";
+//; for (my $i = -1; $i < $maxParserSeqLen; $i++) {
+//;     print " | " if ($i > -1);
+//;     print "extract_target_masked[$i]";
+//; }
+//; print ";\n";
+
+
+// Offsets for each found header
+always_comb
+begin
+    foreach (found_target_offset[i])
+        found_target_offset[i] = found_hdr_buf_pos[i] - curr_pos;
+end
+
+
+// Which header counters should be updated
+always_comb
+begin
+    foreach (update_hdr_cnt[i])
+        update_hdr_cnt[i] = found_in_curr[i] & !pkt_buf_empty;
+end
+
+
+// Track the "overflow" extract positions
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        prev_extract_target <= '0;
+    end
+    else begin
+        prev_extract_target <= prev_extract_target_nxt;
+    end
+end
+
+always_comb
+begin
+    prev_extract_target_nxt = prev_extract_target;
+
+    // Assumptions/restrictions:
+    //   - curr_extract_rd_addr will only be set when we are *in* the header
+    if (pkt_done) begin
+        prev_extract_target_nxt = '0;
+    end
+    else begin
+        // Currently processing a header
+        if (!pkt_buf_empty) begin
+            if (any_found_in_curr || curr_extract_rd_addr != UNKNOWN) begin
+                if (pkt_buf_rd_en) begin
+                    prev_extract_target_nxt = {extract_target_merged_plus_prev[`$wordByteWidth`:`2*$wordByteWidth-1`],
+                                               `$wordByteWidth*$destBits`'d0};
+                end
+                else begin
+                    prev_extract_target_nxt = extract_target_merged_plus_prev;
+                end
+            end
+            else if (found_hdr_buf_vld[0]) begin
+                prev_extract_target_nxt = '0;
+            end
+        end
+    end
+end
+
+
+// Track target offsets
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        curr_target_offset <= '0;
+        prev_extract_target_offset <= '0;
+    end
+    else begin
+        curr_target_offset <= curr_target_offset_nxt;
+        prev_extract_target_offset <= prev_extract_target_offset_nxt;
+    end
+end
+
+always_comb
+begin
+    curr_target_offset_nxt = curr_target_offset;
+    prev_extract_target_offset_nxt = prev_extract_target_offset;
+
+    // Assumptions/restrictions:
+    //   - curr_extract_rd_addr will only be set when we are *in* the header
+    if (pkt_done) begin
+        curr_target_offset_nxt = '0;
+        prev_extract_target_offset_nxt = '0;
+    end
+    else begin
+        // Currently processing a header
+        if (!pkt_buf_empty) begin
+            if (any_found_in_curr) begin
+                curr_target_offset_nxt = extract_offset[last_found_in_curr];
+                if (pkt_buf_rd_en)
+                    prev_extract_target_offset_nxt = {extract_target_offset_merged_plus_prev[`$wordByteWidth`:`2*$wordByteWidth-1`],
+                                                      `$wordByteWidth*$destBits`'d0};
+                else
+                    prev_extract_target_offset_nxt = extract_target_offset_merged_plus_prev;
+            end
+            else if (curr_extract_rd_addr != UNKNOWN) begin
+                if (pkt_buf_rd_en)
+                    prev_extract_target_offset_nxt = {extract_target_offset_merged_plus_prev[`$wordByteWidth`:`2*$wordByteWidth-1`],
+                                                      `$wordByteWidth*$destBits`'d0};
+                else
+                    prev_extract_target_offset_nxt = extract_target_offset_merged_plus_prev;
+            end
+            else if (found_hdr_buf_vld[0]) begin
+                prev_extract_target_offset_nxt = '0;
+            end
+        end
+    end
+end
+
+
+// Identify the extract offsets
+assign extract_offset[-1] = curr_target_offset;
+
+always_comb
+begin
+    foreach (extract_target_offset[i, j])
+        extract_target_offset[i][j] = extract_target_in[i][j] != '0 ? extract_offset[i] : '0;
+end
+
+always_comb
+begin
+    foreach (extract_target_offset_masked[i])
+        extract_target_offset_masked[i] = extract_target_offset_shifted[i] & extract_target_mask[i];
+end
+
+//; print "assign extract_target_offset_merged = ";
+//; for (my $i = -1; $i < $maxParserSeqLen; $i++) {
+//;     print " | " if ($i > -1);
+//;     print "extract_target_offset_masked[$i]";
+//; }
+//; print ";\n";
+
+
+// Generate the extract target offsets
+assign extract_target_offset_merged_plus_prev = extract_target_offset_merged | prev_extract_target_offset;
+assign extract_target_offset_internal = extract_target_offset_merged_plus_prev[0:`$wordByteWidth-1`];
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        extract_target_d1 <= '0;
+        extract_target_offset_d1 <= '0;
+    end
+    else begin
+        extract_target_d1 <= extract_target_internal;
+        extract_target_offset_d1 <= extract_target_offset_internal;
+    end
+end
+
+always_comb
+begin
+    foreach (extract_target_out[i])
+        extract_target_out[i] = extract_target_d1[i] + extract_target_offset_d1[i];
+end
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`
+
+

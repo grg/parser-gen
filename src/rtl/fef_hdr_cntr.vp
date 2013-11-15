@@ -1,0 +1,185 @@
+////////////////////////////////////////////////////////////////
+// fef_hdr_cntr.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Header counter to count the headers/generate offsets
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use ParserJSONImport;
+//; use List::Util;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset, $extractHdrCnt) = calcExtractTables();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//;
+//; my $destBits = log2($totalExtractBytes);
+//; my $tableDepthBits = log2($totalExtractEntries);
+//;
+//; my $numHeaders = numHeaders();
+//;
+//; my $offsetBits = log2($wordByteWidth);
+//; my $extEntryWidthBits = log2($wordByteWidth + 1);
+//;
+//; # FIXME: This should probably be a function
+//; my $totalHeaders = $numHeaders + 1;
+//; my $hdrCntWidth = POSIX::ceil(log($totalHeaders) / log(2));
+
+
+//;
+//; my $foundCntWidth = log2($maxParserSeqLen + 1);
+//;
+//; my $maxHdrCnt = List::Util::max(values(%$extractHdrCnt));
+//; my $cntWidth = log2($maxHdrCnt);
+//; my $cntWidthP1 = log2($maxHdrCnt + 1);
+
+
+import parser_pkg::*;
+
+module `mname()`
+(
+    input logic [0:`$maxParserSeqLen-1`]                update_hdr_cnt,
+    input logic                                         pkt_done,
+
+    // Found header buffer interface
+    input hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_buf_type,
+
+    // Output
+    output logic [0:`$maxParserSeqLen-1`][`$destBits-1`:0]  extract_offset,
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic [0:`$totalHeaders-1`][`$cntWidth-1`:0] hdr_cnt;
+logic [0:`$totalHeaders-1`][`$cntWidth-1`:0] hdr_cnt_nxt;
+
+logic [0:`$totalHeaders-1`][`$cntWidth-1`:0] cnt_inc;
+
+logic [0:`$totalHeaders-1`][`$destBits-1`:0] offset_mem;
+
+logic [0:`$maxParserSeqLen-1`][`$destBits-1`:0] offset;
+logic [0:`$maxParserSeqLen-1`][`$cntWidthP1-1`:0] offset_mult;
+
+
+////////////////////////////////////////
+// Instantiations
+////////////////////////////////////////
+
+
+////////////////////////////////////////
+// Offset ROM
+////////////////////////////////////////
+
+always_comb
+begin
+    offset_mem[0] = '0;
+//; my @hdrNames = getHeaderNames();
+//; for (my $i = 0; $i < $totalHeaders - 1; $i++) {
+//;     my $hdrName = $hdrNames[$i];
+//;     my $offset = $extractOffset->{$hdrName};
+    offset_mem[`$i+1`] = `$offset`;
+//; }
+end
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        hdr_cnt <= '0;
+    end
+    else begin
+        hdr_cnt <= hdr_cnt_nxt;
+    end
+end
+
+// Counter increment calculation
+always_comb
+begin
+    for (integer i = 0; i < `$totalHeaders`; i++) begin
+//; print "        cnt_inc[i] =";
+//; for (my $pos = 0; $pos < $maxParserSeqLen; $pos++) {
+//;     print " +" if $pos > 0;
+//;     print " (update_hdr_cnt[$pos] && found_hdr_buf_type[$pos] == i)";
+//; }
+//; print ";\n";
+    end
+end
+
+always_comb
+begin
+    hdr_cnt_nxt = hdr_cnt;
+    if (pkt_done) begin
+        hdr_cnt_nxt = '0;
+    end
+    else begin
+        foreach (hdr_cnt_nxt[i])
+            hdr_cnt_nxt[i] = hdr_cnt[i] + cnt_inc[i];
+    end
+end
+
+// Memory access/offset calculation
+always_comb
+begin
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+//;     print "\n" if $i > 0;
+    offset[`$i`] = offset_mem[found_hdr_buf_type[`$i`]];
+//;     print "    offset_mult[$i] = hdr_cnt[found_hdr_buf_type[$i]]";
+//;     for (my $j = 0; $j < $i; $j++) {
+//;         print " + (found_hdr_buf_type[$j] == found_hdr_buf_type[$i])";
+//;     }
+//;     print ";\n";
+    extract_offset[`$i`] = offset[`$i`] * offset_mult[`$i`];
+//; }
+end
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+//; if ($debug) {
+always @(posedge clk)
+begin
+    if (|update_hdr_cnt) begin
+        $write("%t: Extract offset(s):", $time);
+        for (integer i = 0; i < `$maxParserSeqLen`; i++)
+            if (update_hdr_cnt[i])
+                $write(" %2d", extract_offset[i]);
+                //$write(" %2d (%2d x %2d)", extract_offset[i], offset[i], offset_mult[i]);
+        $write("\n");
+    end
+end
+//; }
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`
+
+
+

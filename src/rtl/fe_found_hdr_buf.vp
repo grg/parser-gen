@@ -1,0 +1,258 @@
+////////////////////////////////////////////////////////////////
+// vector.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   The output field vector
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use List::Util;
+//;
+//;
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my $bufDepth = 4;
+//; my $occWidth = log2($bufDepth + 1);
+//; my $globalOccWidth = log2(($bufDepth * $maxParserSeqLen) + 1);
+//;
+//; my $foundCntWidth = log2($maxParserSeqLen + 1);
+//;
+//; # FIXME: this should potentially be a function
+//; my $numHeaders = numHeaders();
+//; my $totalHeaders = $numHeaders + 1;
+//; my $hdrCntWidth = POSIX::ceil(log($totalHeaders) / log(2));
+
+
+import parser_pkg::*;
+
+// Found header buffer
+module `mname()`
+(
+    // Found header input
+    input logic [0:`$maxParserSeqLen-1`]                found_hdr_in,
+    input hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type_in,
+    input logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos_in,
+
+    // Found header output
+    output logic [0:`$maxParserSeqLen-1`]               found_hdr_out,
+    output hdr_t [0:`$maxParserSeqLen-1`]               found_hdr_type_out,
+    output logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0]found_hdr_pos_out,
+
+    input logic                         rd,
+    input logic [`$foundCntWidth-1`:0]  rd_amt,
+
+    //Global Signals
+    input logic                         clk,
+    input logic                         rst
+);
+
+
+//////////////////////////////
+// Signals
+//////////////////////////////
+
+hdr_t [0:`$maxParserSeqLen-1`][0:`$bufDepth-1`]                type_buf;
+logic [0:`$maxParserSeqLen-1`][0:`$bufDepth-1`][HDR_WIDTH-1:0] pos_buf;
+
+logic [0:`$maxParserSeqLen-1`][`$occWidth-1`:0] buf_wr_addr;
+logic [0:`$maxParserSeqLen-1`][`$occWidth-1`:0] buf_rd_addr;
+
+logic [`$foundCntWidth-1`:0] buf_wr_curr;
+logic [`$foundCntWidth-1`:0] buf_rd_curr;
+
+logic [0:`$maxParserSeqLen-1`] buf_wr_en;
+logic [0:`$maxParserSeqLen-1`] buf_rd_en;
+
+hdr_t [0:`$maxParserSeqLen-1`]                type_in_rot;
+logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] pos_in_rot;
+
+hdr_t [0:`$maxParserSeqLen-1`]                type_out;
+logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] pos_out;
+
+logic [0:`$maxParserSeqLen-1`] buf_rd_en_pre_rot;
+
+logic [`$globalOccWidth-1`:0] buf_occ;
+
+logic [`$foundCntWidth-1`:0] in_cnt;
+logic [`$foundCntWidth-1`:0] out_cnt;
+
+logic [`$foundCntWidth-1`:0]  rd_amt_qual;
+
+
+//////////////////////////////
+// Buffer write logic
+//////////////////////////////
+
+// Number of found headers
+//; print "assign in_cnt = ";
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+//;     print " + " if $i > 0;
+//;     print "found_hdr_in[$i]";
+//; }
+//; print ";\n";
+
+// Rotate the input signals to generate the buffer write signals
+always_comb
+begin
+    unique case (buf_wr_curr)
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+        `$i` : begin
+//;     if ($i == 0) {
+            buf_wr_en = found_hdr_in;
+            type_in_rot = found_hdr_type_in;
+            pos_in_rot = found_hdr_pos_in;
+//;     } else {
+            buf_wr_en = {found_hdr_in[`$maxParserSeqLen - $i`:`$maxParserSeqLen - 1`],
+                         found_hdr_in[0:`$maxParserSeqLen - $i - 1`]};
+            type_in_rot = {found_hdr_type_in[`$maxParserSeqLen - $i`:`$maxParserSeqLen - 1`],
+                           found_hdr_type_in[0:`$maxParserSeqLen - $i - 1`]};
+            pos_in_rot = {found_hdr_pos_in[`$maxParserSeqLen - $i`:`$maxParserSeqLen - 1`],
+                          found_hdr_pos_in[0:`$maxParserSeqLen - $i - 1`]};
+//;     }
+        end
+//; }
+        default : begin
+            buf_wr_en = found_hdr_in;
+            type_in_rot = found_hdr_type_in;
+            pos_in_rot = found_hdr_pos_in;
+        end
+    endcase
+end
+
+
+//////////////////////////////
+// Buffer read logic
+//////////////////////////////
+
+assign out_cnt = buf_occ >= `$maxParserSeqLen` ? `$maxParserSeqLen` : buf_occ[`$foundCntWidth - 1`:0];
+assign rd_amt_qual = rd ? rd_amt : '0;
+
+// Generate vld_out signals
+always_comb
+begin
+    unique case (out_cnt)
+//; for (my $i = 1; $i <= $maxParserSeqLen; $i++) {
+        `$i` : found_hdr_out = '1 << `$maxParserSeqLen - $i`;
+//; }
+        default : found_hdr_out = '0;
+    endcase
+end
+
+// Generate non-rotated read enable signals
+always_comb
+begin
+    unique case (rd_amt_qual)
+//; for (my $i = 1; $i <= $maxParserSeqLen; $i++) {
+        `$i` : buf_rd_en_pre_rot = '1 << `$maxParserSeqLen - $i`;
+//; }
+        default : buf_rd_en_pre_rot = '0;
+    endcase
+end
+
+// Rotate the output signals to generate the buffer write signals
+always_comb
+begin
+    unique case (buf_rd_curr)
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+        `$i` : begin
+//;     if ($i == 0) {
+            buf_rd_en = buf_rd_en_pre_rot;
+            found_hdr_type_out = type_out;
+            found_hdr_pos_out = pos_out;
+//;     } else {
+            buf_rd_en = {buf_rd_en_pre_rot[`$maxParserSeqLen - $i`:`$maxParserSeqLen - 1`],
+                         buf_rd_en_pre_rot[0:`$maxParserSeqLen - $i - 1`]};
+            found_hdr_type_out = {type_out[`$i`:`$maxParserSeqLen - 1`],
+                                  type_out[0:`$i - 1`]};
+            found_hdr_pos_out = {pos_out[`$i`:`$maxParserSeqLen - 1`],
+                                 pos_out[0:`$i - 1`]};
+//;     }
+        end
+//; }
+        default : begin
+            buf_rd_en = buf_rd_en_pre_rot;
+            found_hdr_type_out = type_out;
+            found_hdr_pos_out = pos_out;
+        end
+    endcase
+end
+
+
+//////////////////////////////
+// Buffer occupancy logic
+//////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        buf_occ <= '0;
+    end
+    else begin
+        buf_occ <= buf_occ + in_cnt - rd_amt_qual;
+    end
+end
+
+
+//////////////////////////////
+// Buffer access logic
+//////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        buf_wr_addr <= '0;
+        buf_wr_curr <= '0;
+    end
+    else begin
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+        if (buf_wr_en[`$i`]) begin
+            if (buf_wr_addr[`$i`] == `$bufDepth - 1`)
+                buf_wr_addr[`$i`] <= '0;
+            else
+                buf_wr_addr[`$i`] <= buf_wr_addr[`$i`] + 1;
+
+            type_buf[`$i`][buf_wr_addr[`$i`]] <= type_in_rot[`$i`];
+            pos_buf[`$i`][buf_wr_addr[`$i`]] <= pos_in_rot[`$i`];
+        end
+
+//; }
+        if (buf_wr_curr < `$maxParserSeqLen` - in_cnt)
+            buf_wr_curr <= buf_wr_curr + in_cnt;
+        else
+            buf_wr_curr <= buf_wr_curr + in_cnt - `$maxParserSeqLen`;
+    end
+end
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        buf_rd_addr <= '0;
+        buf_rd_curr <= '0;
+    end
+    else begin
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+        if (buf_rd_en[`$i`]) begin
+            if (buf_rd_addr[`$i`] == `$bufDepth - 1`)
+                buf_rd_addr[`$i`] <= '0;
+            else
+                buf_rd_addr[`$i`] <= buf_rd_addr[`$i`] + 1;
+        end
+
+//; }
+        if (buf_rd_curr < `$maxParserSeqLen` - rd_amt_qual)
+            buf_rd_curr <= buf_rd_curr + rd_amt_qual;
+        else
+            buf_rd_curr <= buf_rd_curr + rd_amt_qual - `$maxParserSeqLen`;
+    end
+end
+
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+assign type_out[`$i`] = type_buf[`$i`][buf_rd_addr[`$i`]];
+assign pos_out[`$i`] = pos_buf[`$i`][buf_rd_addr[`$i`]];
+
+//; }
+
+endmodule : `mname`

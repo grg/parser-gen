@@ -1,0 +1,120 @@
+////////////////////////////////////////////////////////////////
+// vector.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   The output field vector
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # ===========
+//; # PARAMETERS:
+//; # ===========
+//;
+//; my $widthBits = parameter(name=>'Width', val=>"4096",
+//;                           doc=>'!FUNCTIONAL! Field vector width (bits)');
+//; my $widthBytes = $widthBits / 8;
+//;
+//; # Verify the sanity of inputs
+//; if ($widthBits % 8 != 0) {
+//;     $self->error("Vector width must be a multiple of 8 bits. Specified: $widthBits")
+//; }
+//;
+//; my $dstWidth = log2($widthBits);
+
+import parser_pkg::*;
+
+// Field output vector
+module `mname()`
+(
+    output logic [0:`$widthBits-1`]     fields,
+    output logic [0:`$widthBytes-1`]    fields_vld,
+
+    input logic                         we,
+
+    input logic [0:`$widthBytes-1`][7:0]dst_data,
+    input logic [0:`$widthBytes-1`]     dst_wr,
+
+    input logic                         flush,
+
+    //Global Signals
+    input logic                         clk,
+    input logic                         rst
+);
+
+typedef union packed {
+    logic [0:`$widthBits-1`] bits;
+    logic [0:`$widthBytes-1`][7:0] bytes;
+} field_vector_t;
+
+field_vector_t _fields;
+
+assign fields = _fields.bits;
+
+//; # Generate assignment statements for each byte
+//; for (my $i = 0; $i < $widthBytes; $i++) {
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        _fields.bytes[`$i`] <= '0;
+        fields_vld[`$i`] <= '0;
+    end
+    else if (we) begin
+        if (flush) begin
+            _fields.bytes[`$i`] <= '0;
+            fields_vld[`$i`] <= '0;
+        end
+        else if (dst_wr[`$i`]) begin
+            _fields.bytes[`$i`] <= dst_data[`$i`];
+            fields_vld[`$i`] <= '1;
+        end
+    end
+end
+//; }
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+//logic [`$dstWidth+1-1`:0] max_written;
+//logic [`$dstWidth+1-1`:0] max_written_tmp;
+//
+//always_ff @(posedge clk or posedge rst)
+//begin
+//    if (rst || flush)
+//        max_written <= '1;
+//    else if (we) begin
+//        max_written_tmp = max_written;
+//        for (integer i = 0; i < `$widthBytes`; i++)
+//            if (dst_wr[i] && (i > max_written_tmp || max_written_tmp == '1))
+//                max_written_tmp = i;
+//        max_written <= max_written_tmp;
+//    end
+//end
+//
+//always_ff @(posedge clk)
+//begin
+//    if (we && flush) begin
+//        if (max_written != '1) begin
+//            $write("%t (%m): EXTRACT FIELD VECTOR (0:%1d): ", $time, max_written);
+//            for (integer i = 0; i <= max_written; i++)
+//                $write(" %02x", _fields.bytes[i]);
+//            $write("\n");
+//        end
+//        else
+//            $display("%t (%m): EXTRACT FIELD VECTOR:  empty", $time);
+//    end
+//end
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

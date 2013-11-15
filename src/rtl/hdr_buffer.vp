@@ -1,0 +1,289 @@
+////////////////////////////////////////////////////////////////
+// hdr_buffer.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Buffers input data
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser qw(log2 getBufRdWidth);
+//;
+//  PARAMETERS:
+//; my $wordWidth  = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Word width (bits)',
+//;                               min=>1 , max=>128, step=>1);
+//; my $inWidth  = parameter( name=>'InputWidth', val=>4,
+//;                               doc=>'!FUNCTIONAL! Input width of buffer (words)',
+//;                               min=>1 , max=>128, step=>1);
+//; my $inBitWidth = $wordWidth * $inWidth;
+//; my $outWidth  = parameter( name=>'OutputWidth', val=>4,
+//;                               doc=>'!FUNCTIONAL! Output width of buffer (words)',
+//;                               min=>1 , max=>128, step=>1);
+//; my $outBitWidth = $wordWidth * $outWidth;
+//; my @vldDepths = map { 2 ** $_ } (0..5);
+//; my $depth = parameter( name=>'Depth', val=>1,
+//;                               doc=>'!FUNCTIONAL! Depth of buffer (words)',
+//;                               list=>\@vldDepths);
+//; my $addrBits = log2($depth);
+//; my $mult = 1;
+//; my $inc = $inWidth;
+//; if ($outWidth % $inWidth == 0) {
+//;     $mult = $inWidth;
+//;     $inc = 1;
+//; }
+//; my $offsetMax = $outWidth / $mult;
+//; my $offsetBits = log2($offsetMax);
+//;
+//; # Verify the sanity of inputs
+//; # Output width must be >= input width
+//; if ($inWidth > $outWidth) {
+//;     $self->error("Input width must be <= output width. Specified: in: $inWidth, out: $outWidth");
+//; }
+//; ### Output must be a multiple of the input?
+//; ##if ($inWidth > $outWidth) {
+//; ##    $self->error("Input width must be <= output width. Specified: in: $inWidth, out: $outWidth");
+//; ##}
+//;
+
+import parser_pkg::*;
+
+// Top-level parser
+module `mname()`
+(
+    // Write Signals
+    input logic                             wr_en,
+    input logic [`$inBitWidth-1`:0]         wr_data,
+
+    input logic                             flush_buf,
+    input logic                             force_write,
+
+    // Read Signals
+    input logic                             rd_en,
+    output logic [`$outBitWidth-1`:0]       rd_data,
+
+    output logic                            empty,
+    output logic                            nearly_full,
+    output logic                            full,
+
+    // Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic [`$addrBits-1`:0]             wr_addr;
+logic [`$addrBits-1`:0]             rd_addr;
+
+logic signed [`$addrBits+2-1`:0]    occupancy;
+
+//; if ($inWidth != $outWidth) {
+logic [0:`$outBitWidth-1`]          wr_buf, wr_buf_nxt;
+logic [`$offsetBits-1`:0]           wr_buf_pos, wr_buf_pos_nxt;
+
+logic [0:`$outBitWidth-1`]          wr_data_int;
+//; }
+logic wr_en_int;
+logic force_d1, force_nxt;
+
+
+////////////////////////////////////////
+// Module instantiations
+////////////////////////////////////////
+
+//; my $mem = generate('ram_multiport', 'hdr_buffer_mem',
+//;                     Width => $outBitWidth, Depth => $depth,
+//;                     WritePorts => 1, ReadPorts => 1,
+//;                   );
+`$mem->instantiate()` (
+            .wr_en_0 (wr_en_int),
+            .wr_addr_0 (wr_addr),
+//; if ($inWidth != $outWidth) {
+            .wr_data_0 (wr_data_int),
+//; } else {
+            .wr_data_0 (wr_data),
+//; }
+
+            .rd_addr_0 (rd_addr),
+            .rd_data_0 (rd_data),
+
+            .*
+    );
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        wr_addr <= '0;
+        rd_addr <= '0;
+        occupancy <= '0;
+    end
+    else begin
+        if (wr_en_int)
+            wr_addr <= wr_addr + `$addrBits`'d1;
+
+        if (rd_en)
+            rd_addr <= rd_addr + `$addrBits`'d1;
+
+        if (wr_en_int && !rd_en)
+            occupancy <= occupancy + `$addrBits+2`'d1;
+        else if (!wr_en_int && rd_en)
+            occupancy <= occupancy - `$addrBits+2`'d1;
+        //else if (wr_en_int && rd_en)
+        //    occupancy <= occupancy - 1 + 1;
+    end
+end
+
+//; if ($inWidth != $outWidth) {
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        wr_buf <= '0;
+        wr_buf_pos <= '0;
+
+        force_d1 <= '0;
+    end
+    else begin
+        wr_buf <= wr_buf_nxt;
+        wr_buf_pos <= wr_buf_pos_nxt;
+
+        force_d1 <= force_nxt;
+    end
+end
+always_comb
+begin
+    wr_en_int = '0;
+    wr_data_int = wr_buf;
+
+    wr_buf_nxt = wr_buf;
+    wr_buf_pos_nxt = wr_buf_pos;
+
+    force_nxt = '0;
+
+//; ### FORCE WRITE BEGIN ###
+    if (wr_en && force_write) begin
+        // Assumption: force_write and force_d1 won't be asserted
+        // simulataneously
+        unique case (wr_buf_pos)
+//;     for (my $i = 0; $i < $offsetMax; $i++) {
+//;         if ($i < $offsetMax-1) {
+            `$offsetBits`'d`$i` : begin
+//;         } else {
+            default : begin
+//;         }
+//;         if ($i * $mult + $inWidth < $outWidth) {
+                wr_en_int = '1;
+                wr_data_int[`$i * $mult * $wordWidth` +: `$inBitWidth`] = wr_data;
+
+                //wr_buf_nxt = `$outBitWidth`'d0;
+//;         } else {
+//;             my $delayAmt = ($i * $mult + $inWidth - $outWidth) * $wordWidth;
+                wr_en_int = '1;
+//;             if ($delayAmt == 0) {
+                wr_data_int[`$i * $mult * $wordWidth` +: `$inBitWidth`] = wr_data;
+
+                //wr_buf_nxt = `$outBitWidth`'d0;
+//;             } else {
+                wr_data_int[`$i * $mult * $wordWidth` : `$outBitWidth-1`] = wr_data[`$inBitWidth-1`:`$delayAmt`];
+
+                force_nxt = '1;
+                //wr_buf_nxt = {wr_data[`$delayAmt - 1` : 0], `$outBitWidth - $delayAmt`'d0};
+                wr_buf_nxt[0 : `$delayAmt-1`] = wr_data[`$delayAmt - 1` : 0];
+//;             }
+//;         }
+                wr_buf_pos_nxt = `$offsetBits`'d0;
+            end
+
+//;     }
+        endcase
+    end
+//; ### FORCE WRITE END ###
+//; ### NON-FORCE WRITE BEGIN ###
+    else if (force_d1) begin
+        // The write buffer position *must* be at zero, and the first write
+        // can't cause a write to the buffer
+        wr_en_int = '1;
+
+        if (wr_en) begin
+            wr_buf_nxt[0 +: `$inBitWidth`] = wr_data;
+            wr_buf_pos_nxt = `$offsetBits`'d`$inc`;
+        end
+    end
+    else if (wr_en) begin
+        unique case (wr_buf_pos)
+//;     for (my $i = 0; $i < $offsetMax; $i++) {
+//;         if ($i < $offsetMax-1) {
+            `$offsetBits`'d`$i` : begin
+//;         } else {
+            default : begin
+//;         }
+//;         if ($i * $mult + $inWidth < $outWidth) {
+                wr_buf_nxt[`$i * $mult * $wordWidth` +: `$inBitWidth`] = wr_data;
+                wr_buf_pos_nxt = `$offsetBits`'d`$i + $inc`;
+//;         } else {
+//;             my $delayAmt = ($i * $mult + $inWidth - $outWidth) * $wordWidth;
+                wr_en_int = '1;
+//;             if ($delayAmt == 0) {
+                wr_data_int[`$i * $mult * $wordWidth` +: `$inBitWidth`] = wr_data;
+
+                //wr_buf_nxt = `$outBitWidth`'d0;
+//;             } else {
+                wr_data_int[`$i * $mult * $wordWidth` : `$outBitWidth-1`] = wr_data[`$inBitWidth-1`:`$delayAmt`];
+
+                //wr_buf_nxt = {wr_data[`$delayAmt - 1` : 0], `$outBitWidth - $delayAmt`'d0};
+                wr_buf_nxt[0:`$delayAmt-1`] = wr_data[`$delayAmt - 1` : 0];
+//;             }
+                wr_buf_pos_nxt = `$offsetBits`'d`$delayAmt / $mult / $wordWidth`;
+//;         }
+            end
+
+//;     }
+        endcase
+    end
+//; ### NON-FORCE WRITE END ###
+end
+
+//; } else {
+assign wr_en_int = wr_en;
+//; }
+
+assign empty = occupancy <= 0;
+assign nearly_full = occupancy == `$depth - 1`;
+assign full = occupancy == `$depth`;
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+// Check for memory overflow
+always @(posedge clk)
+begin
+    if (full && wr_en_int && !rd_en) begin
+        $display("%t: =================================================================================================", $time);
+        $display("%t: %m: ERROR: Buffer overflow: depth: %2d  wr_pos: %2d  rd_pos: %2d  occupancy: %2d", $time, `$depth`, wr_addr, rd_addr, occupancy);
+        $display("%t: =================================================================================================", $time);
+    end
+
+    if (empty && rd_en) begin
+        $display("%t: =================================================================================================", $time);
+        $display("%t: %m: ERROR: Buffer underflow: depth: %2d  wr_pos: %2d  rd_pos: %2d  occupancy: %2d", $time, `$depth`, wr_addr, rd_addr, occupancy);
+        $display("%t: =================================================================================================", $time);
+    end
+end
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

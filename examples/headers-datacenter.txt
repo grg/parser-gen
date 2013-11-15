@@ -1,0 +1,165 @@
+#
+# Datacenter parse graph (see paper)
+#
+
+ethernet {
+	fields {
+		dstAddr : 48 : extract,
+		srcAddr : 48 : extract,
+		etherType : 16 : extract,
+	}
+	next_header = map(etherType) {
+		0x8100, 0x9100, 0x9200, 0x9300 : ieee802-1q,
+		0x0800 : ipv4,
+		0x0806, 0x8035 : arp_rarp,
+	}
+	# This is some test code
+}
+
+ethernet2 {
+	fields {
+		dstAddr : 48 : extract,
+		srcAddr : 48 : extract,
+		etherType : 16 : extract,
+	}
+}
+
+ieee802-1q {
+	fields {
+		pcp : 3 : extract,
+		cfi : 1,
+		vid : 12 : extract,
+		etherType : 16 : extract,
+	}
+	next_header = map(etherType) {
+		0x8100, 0x9100, 0x9200, 0x9300 : ieee802-1q,
+		0x0800 : ipv4,
+		0x0806, 0x8035 : arp_rarp,
+	}
+	max_var = vlan
+	max = 2
+}
+
+ipv4 {
+	fields {
+		version : 4,
+		ihl : 4,
+		diffserv : 8 : extract,
+		totalLen : 16,
+		identification : 16,
+		flags : 3 : extract,
+		fragOffset : 13,
+		ttl : 8 : extract,
+		protocol : 8 : extract,
+		hdrChecksum : 16,
+		srcAddr : 32 : extract,
+		dstAddr : 32 : extract,
+		options : *,
+	}
+	next_header = map(fragOffset, protocol) {
+		1 : icmp,
+		6 : tcp,
+		17 : udp,
+		47 : gre,
+	}
+	length = ihl * 4 * 8
+	max_length = 256
+}
+
+icmp {
+	fields {
+		type : 8 : extract,
+		code : 8 : extract,
+		hdrChecksum : 16,
+	}
+}
+
+tcp {
+	fields {
+		srcPort : 16 : extract,
+		dstPort : 16 : extract,
+		seqNo : 32,
+		ackNo : 32,
+		dataOffset : 4,
+		res : 3,
+		ecn : 3,
+		ctrl : 6,
+		window : 16,
+		checksum : 16,
+		urgentPtr : 16,
+		options : *,
+	}
+	length = dataOffset * 4 * 8
+	max_length = 192
+}
+
+udp {
+	fields {
+		srcPort : 16 : extract,
+		dstPort : 16 : extract,
+		length : 16,
+		checksum : 16,
+	}
+	next_header = map(dstPort) {
+		65535 : vxlan, # Made up value for port -- not yet assigned
+	}
+}
+
+gre {
+	fields {
+		C : 1,
+		R : 1,
+		K : 1,
+		S : 1,
+		s : 1,
+		recurse : 3,
+		flags : 5,
+		ver : 3,
+		proto : 16 : extract,
+	}
+	next_header = map(K, proto) {
+		0x16558 : nv_gre_inner,
+		0x16559 : gre,
+	}
+	max = 3
+}
+
+nv_gre_inner {
+	fields {
+		tni : 24 : extract,
+		reserved : 8
+	}
+	next_header = ethernet2
+}
+
+arp_rarp {
+	fields {
+		hwType : 16,
+		protoType : 16,
+		hwAddrLen : 8,
+		protoAddrLen : 8,
+		opcode : 16 : extract,
+	}
+	next_header = map(protoType) {
+		0x0800 : arp_rarp_ipv4
+	}
+}
+
+arp_rarp_ipv4 {
+	fields {
+		srcHwAddr : 48 : extract,
+		srcProtoAddr : 32 : extract,
+		dstHwAddr : 48 : extract,
+		dstProtoAddr : 32 : extract,
+	}
+}
+
+vxlan {
+	fields {
+		flags : 8,
+		reserved : 24,
+		vni : 24 : extract,
+		reserved2 : 8,
+	}
+	next_header = ethernet2
+}

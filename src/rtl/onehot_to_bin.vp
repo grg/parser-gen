@@ -1,0 +1,39 @@
+////////////////////////////////////////////////////////////////
+// onehot_to_bin.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   One-hot to binary decoder
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser qw( log2 );
+//;
+//; my $srcWidth = parameter(name=>'SrcWidth', val=>"8",
+//;                           doc=>'!FUNCTIONAL! One-hot source width');
+//; my $dstWidth = log2($srcWidth);
+
+// One-hot to binary decoder
+module `mname()`
+(
+    input logic [`$srcWidth-1`:0]       src,
+    output logic [`$dstWidth-1`:0]      dst
+);
+
+// One-hot inputs that cause certain bits to be set
+wire [`$dstWidth-1`:0][`$srcWidth-1`:0] hit;
+//; for (my $i = 0; $i < $dstWidth; $i++) {
+//;     for (my $j = 0; $j < $srcWidth; $j++) {
+assign hit[`$i`][`$j`] = 1'b`((2 ** $i) & $j) >> $i`;
+//;     }
+
+//; }
+
+// Assign the one-hot outputs
+//; for (my $i = 0; $i < $dstWidth; $i++) {
+assign dst[`$i`] = |(hit[`$i`] & src);
+//; }
+
+endmodule : `mname`

@@ -1,0 +1,123 @@
+////////////////////////////////////////////////////////////////
+// shifter.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Shifts an input word left or right
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//;
+//  PARAMETERS:
+//; my $inputWidth = parameter( name=>'InputWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Bit width of shifter input');
+//; my $outputWidth = parameter( name=>'OutputWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Bit width of shifter output');
+//; my $shiftDir = parameter( name=>'ShiftDir', val=>'left', List=>['left', 'right'],
+//;                               doc=>'!FUNCTIONAL! Shift direction [left/right]');
+//; my $shiftLeft = $shiftDir eq 'left';
+//; my $shiftMult = parameter( name=>'ShiftMult', val=>1,
+//;                               doc=>'!FUNCTIONAL! Shift value multiplier');
+//; my $shiftBits = parameter( name=>'ShiftBits', val=>1,
+//;                               doc=>'!FUNCTIONAL! Bits to express shift amount');
+//; my $wrap = parameter( name=>'Wrap', val=>'no', List=>['yes', 'no'],
+//;                               doc=>'!FUNCTIONAL! Wrap the shifter [yes/no]');
+//; $wrap = $wrap eq 'yes';
+//; my $maxShiftAmt = parameter( name=>'MaxShiftAmt', val=>0,
+//;                               doc=>'!FUNCTIONAL! Maximum amount to shift');
+//; if ($maxShiftAmt == 0) {
+//;     $maxShiftAmt = 2 ** $shiftBits;
+//; }
+//; my $shiftOffset = parameter( name=>'ShiftOffset', val=>0,
+//;                               doc=>'!FUNCTIONAL! Offset adjustment (-ve or +ve)');
+
+// Shifter
+module `mname()`
+(
+    //Input Signals
+    input logic [`$inputWidth-1`:0]     in_data,
+    input logic [`$shiftBits-1`:0]      shift_amt,
+
+    //Output Signals
+    output logic [`$outputWidth-1`:0]   out_data
+);
+
+//; my $wrapAmt;
+//; my $inputWidthPadded = $inputWidth;
+//; if ($inputWidth < $outputWidth) {
+//;     $wrapAmt = 0;
+//;     $inputWidthPadded = $outputWidth;
+//;     if ($shiftLeft) {
+wire [`$inputWidthPadded-1`:0] in_data_padded = {`$outputWidth - $inputWidth`'d0, in_data};
+//;     } else {
+wire [`$inputWidthPadded-1`:0] in_data_padded = {in_data, `$outputWidth - $inputWidth`'d0};
+//;     }
+//; } else {
+//;     $wrapAmt = $inputWidth - $outputWidth;
+wire [`$inputWidthPadded-1`:0] in_data_padded = in_data;
+//; }
+
+always_comb
+begin
+    unique case(shift_amt)
+//;     # Walk through the possible values of the shift amount
+//;     for (my $i = 0; $i < 2 ** $shiftBits && $i <= $maxShiftAmt; $i++) {
+//;         # Begin by calculating the MSB/LSB ignoring wrapping/overflow
+//;         my ($firstMSB, $firstLSB);
+//;         $firstMSB = ($i + $shiftOffset) * $shiftMult + $outputWidth - 1;
+//;         $firstLSB = ($i + $shiftOffset) * $shiftMult;
+//;
+//;         # Adjust the MSB/LSB, taking into account wrapping
+//;         my $secondMSB = $firstMSB % $inputWidthPadded;
+//;         my $secondLSB = $firstLSB % $inputWidthPadded;
+//;         my $wrapped = $secondMSB != $firstMSB || $secondLSB != $firstLSB;
+//;         if ($wrapped && $wrap) {
+//;             if (int($firstMSB / $inputWidthPadded) == int($firstLSB / $inputWidthPadded)) {
+//;                 $firstMSB = $secondMSB;
+//;                 $firstLSB = $secondLSB;
+//;                 $wrapped = 0;
+//;             } else {
+//;                 $firstMSB = $inputWidthPadded - 1;
+//;                 $firstLSB = $secondLSB;
+//;                 $secondLSB = 0;
+//;             }
+//;         } elsif ($wrapped && !$wrap) {
+//;             if ($firstLSB < 0) {
+//;                 $firstLSB = 0;
+//;                 $firstMSB = 0 if $firstMSB < 0;
+//;             }
+//;             elsif ($firstLSB < $inputWidthPadded) {
+//;                 $firstMSB = $inputWidthPadded - 1;
+//;             } else {
+//;                 $firstMSB = $inputWidthPadded;
+//;                 $firstLSB = $inputWidthPadded;
+//;             }
+//;         }
+//;
+//;         # Finally, generate the selection from in_data_padded
+//;         my $outDataStr;
+//;         if (!$wrapped) {
+//;             $outDataStr = "in_data_padded[$firstMSB:$firstLSB]";
+//;         } elsif ($wrap) {
+//;             $outDataStr = "{in_data_padded[$firstMSB:$firstLSB], in_data_padded[$secondMSB:$secondLSB]}";
+//;         } else {
+//;             if ($firstLSB < $inputWidthPadded) {
+//;                 my $padAmt = $outputWidth - ($firstMSB - $firstLSB + 1);
+//;                 if ($shiftLeft) {
+//;                     $outDataStr = "{in_data_padded[$firstMSB:$firstLSB], ${padAmt}'d0}";
+//;                 } else {
+//;                     $outDataStr = "{${padAmt}'d0, in_data_padded[$firstMSB:$firstLSB]}";
+//;                 }
+//;             } else {
+//;                 $outDataStr = "${outputWidth}'d0";
+//;             }
+//;         }
+        `$i < $maxShiftAmt ? $i : 'default'` : out_data = `$outDataStr`;
+//;     }
+    endcase
+end
+
+endmodule : `mname`
+

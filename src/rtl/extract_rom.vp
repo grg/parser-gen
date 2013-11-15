@@ -1,0 +1,134 @@
+////////////////////////////////////////////////////////////////
+// extract_rom.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Extract table ROM
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # PARAMETERS:
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my @hdrNames = getHeaderNames();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = getExtractTables();
+//;
+//; my $destBits = log2($totalExtractBytes);
+//; my $tableDepthBits = log2($totalExtractEntries);
+//; my $tableDepth = 2 ** log2($totalExtractEntries);
+//; my $extEntryWidthBits = log2($wordByteWidth + 1);
+//;
+//; my $numHeaders = numHeaders();
+//; my $totalHeaders = $numHeaders + 1;
+//;
+//; my $entryDispWidth = log10($tableDepth);
+//; my $extractTargetDispWidth = log10($totalExtractBytes);
+//; my $widthDispWidth = log10($wordByteWidth);
+//;
+//; print STDOUT "Extract ROM size: " . ($destBits * $wordByteWidth) . "b x $tableDepth (target)   ${tableDepthBits}b x $tableDepth (addr)\n";
+
+import parser_pkg::*;
+
+
+// Top-level parser
+module `mname()`
+(
+    //Input Signals
+    input logic[0:`$maxParserSeqLen+1`][`$tableDepthBits-1`:0] rd_addr,
+
+    //Output Signals
+    output logic[0:`$maxParserSeqLen+1`][0:`$wordByteWidth-1`][`$destBits-1`:0] extract_target,
+    output logic[0:`$maxParserSeqLen+1`][0:`$extEntryWidthBits-1`] entry_width,
+    output logic[0:`$maxParserSeqLen+1`][`$tableDepthBits-1`:0] nxt_addr,
+
+
+    //Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+logic [`$destBits-1`:0][0:`$wordByteWidth-1`] target_mem [0:`$tableDepth-1`];
+logic [`$tableDepthBits-1`:0] nxt_addr_mem [0:`$tableDepth-1`];
+logic [`$extEntryWidthBits-1`:0] entry_width_mem [0:`$tableDepth-1`];
+
+always_comb
+begin
+//; sub printExtractMemoryEntry {
+//;     my ($pos, $nxtPos, $extractWord, $hdrName, $wordNum) = @_;
+//;
+//;     printf "    nxt_addr_mem[%0${entryDispWidth}d] = $tableDepthBits\'d%0${entryDispWidth}d;", $pos, $nxtPos;
+//;     printf "   target_mem[%0${entryDispWidth}d] = {", $pos;
+//;
+//;     my $entryWidth = 0;
+//;     for (my $i = 0; $i < $wordByteWidth; $i++) {
+//;         my $dstPos = $extractWord->[$i];
+//;         print ", " if $i != 0;
+//;         printf "$destBits\'d%0${extractTargetDispWidth}d", $dstPos;
+//;         $entryWidth = $i + 1 if $dstPos != 0;
+//;     }
+//;     print "};";
+//;     
+//;     $entryWidth = $wordByteWidth if $nxtPos != 0;
+//;     printf "   entry_width_mem[%0${entryDispWidth}d] = $extEntryWidthBits\'d%0${widthDispWidth}d;    // $hdrName:$wordNum\n", $pos, $entryWidth;
+//; }
+//;
+//; my $pos = 0;
+//; printExtractMemoryEntry($pos, $pos, [(0) x $wordByteWidth], "UNKNOWN", 0);
+//; $pos++;
+
+//; my $secondaryStart = $totalHeaders;
+//; foreach my $hdrName (@hdrNames) {
+//;     #use Data::Dumper;
+//;     #print STDERR Dumper($extractMap->{$hdrName});
+//;     #print STDERR Dumper(getHeader('ipv4'));
+//;     #exit 1;
+//;     my $numExtractWords = scalar(@{$extractMap->{$hdrName}});
+//;     my $firstExtractWord = $extractMap->{$hdrName}->[0];
+//;     my $nxtMemPos = 0;
+//;     if ($numExtractWords > 1) {
+//;         $nxtMemPos = $secondaryStart;
+//;         $secondaryStart += $numExtractWords - 1;
+//;     }
+//;
+//;     printExtractMemoryEntry($pos, $nxtMemPos, $firstExtractWord, $hdrName, 0);
+//;     $pos++;
+//; }
+
+//; $secondaryStart = $totalHeaders;
+//; foreach my $hdrName (@hdrNames) {
+//;     my $numExtractWords = scalar(@{$extractMap->{$hdrName}});
+//;     my $nxtMemPos = $secondaryStart + 1;
+//;     $secondaryStart += $numExtractWords - 1 if $numExtractWords > 1;
+//;     for (my $i = 1; $i < $numExtractWords; $i++) {
+//;         my $extractWord = $extractMap->{$hdrName}->[$i];
+//;         $nxtMemPos = 0 if ($i == ($numExtractWords - 1));
+//;         printExtractMemoryEntry($pos, $nxtMemPos, $extractWord, $hdrName, $i);
+//;
+//;         $pos++;
+//;         $nxtMemPos++;
+//;     }
+//; }
+end
+
+//; for (my $i = 0; $i < $maxParserSeqLen + 2; $i++) {
+assign extract_target[`$i`] = target_mem[rd_addr[`$i`]];
+//; }
+
+//; for (my $i = 0; $i < $maxParserSeqLen + 2; $i++) {
+assign nxt_addr[`$i`] = nxt_addr_mem[rd_addr[`$i`]];
+//; }
+
+//; for (my $i = 0; $i < $maxParserSeqLen + 2; $i++) {
+assign entry_width[`$i`] = entry_width_mem[rd_addr[`$i`]];
+//; }
+
+endmodule : `mname`
+

@@ -1,0 +1,224 @@
+////////////////////////////////////////////////////////////////
+// field_extract_prog.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Field extraction module for a programmable parser
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $bufWords = parameter( name=>'BufWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of words to extract from the buffer',
+//;                               min=>2 , max=>8, step=>1);
+//; my $evWidthBits = parameter(name=>'ExtractVectorWidth', val=>"4096",
+//;                           doc=>'!FUNCTIONAL! Extract field vector width (bits)');
+//; my $evWidthBytes = $evWidthBits / 8;
+//; my $evInputs = parameter(name=>'NumExtractVectorInputs', val=>"12",
+//;                           doc=>'!FUNCTIONAL! Number of single-byte inputs to the extract field vector');
+//; my $progMaxHdrs = parameter( name=>'ProgMaxHdrs', val=>32,
+//;                               doc=>'!FUNCTIONAL! Maximum number of headers',
+//;                               min=>1 , max=>128, step=>1);
+//; my $numHdrIdent = parameter(name=>'NumHdrIdent', val=>"3",
+//;                           doc=>'!FUNCTIONAL! Number of headers identified in a single cycle');
+//; my $hdrTypeWidth = log2($progMaxHdrs);
+//; my $progBufByteWidth = parameter( name=>'ProgBufWordWidth', val=>16,
+//;                               doc=>'!FUNCTIONAL! Width of programmable buffer (bytes)',
+//;                               min=>1 , max=>128, step=>1);
+//; my $progBufBitWidth = $progBufByteWidth * 8;
+//;
+//; # Verify that the byte width is a power of two
+//; if (2 ** log2($progBufByteWidth) != $progBufByteWidth) {
+//;     $self->error("Prog buffer word byte width must be a power of two. Specified: $progBufByteWidth");
+//; }
+//; if ($evWidthBits % 8 != 0) {
+//;     $self->error("Extract field vector width must be a multiple of 8 bits. Specified: $evWidthBits")
+//; }
+//;
+//; my $progByteCntWidth = log2($progBufByteWidth);
+//; my $evDstWidth = log2($evWidthBits);
+
+import parser_pkg::*;
+
+// Top-level parser
+module `mname()`
+(
+    // Main state machine interface
+    input logic [`$bufWords-1`:0][`$progBufBitWidth-1`:0]   buf_data,
+    input logic [`$bufWords-1`:0][`$progBufByteWidth-1`:0]  buf_eop,
+    input logic [`$bufWords-1`:0]                           buf_vld,
+
+    input logic [HDR_WIDTH-1:0]         curr_pos,
+
+    input logic                         rd_active,
+    input logic                         hi_pkt_done,
+
+    // Data from lookup engine
+    input logic                         do_lookup,
+
+    // Data from lookup engine
+    input logic [`$evInputs-1`:0][`$progByteCntWidth-1`:0]  lt_extract_src,
+    input logic [`$evInputs-1`:0][`$evDstWidth-1`:0]    lt_extract_dst,
+
+    input logic [`$numHdrIdent-1`:0]                       lt_found_hdr,
+    input logic [`$numHdrIdent-1`:0][`$hdrTypeWidth-1`:0]  lt_found_hdr_type,
+    input logic [`$numHdrIdent-1`:0][`$progByteCntWidth-1`:0]  lt_found_hdr_pos,
+    input logic [`$numHdrIdent-1`:0][7:0]                  lt_found_hdr_size,
+
+    // Data to extract vector
+    output logic [`$evInputs-1`:0][7:0]                 ev_data,
+    output logic [`$evInputs-1`:0][`$evDstWidth-1`:0]   ev_addr,
+    output logic [`$evInputs-1`:0]                      ev_wr_en,
+    output logic                                        ev_flush,
+
+    // Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic [`$progBufBitWidth-1`:0]     prev_data;
+logic [HDR_WIDTH-1:0]           prev_pos;
+logic [`$evInputs-1`:0][`$progByteCntWidth-1`:0]  ev_src_int;
+logic [`$evInputs-1`:0][`$evDstWidth-1`:0]    ev_dst_int;
+
+logic extract_req;
+
+logic [`$evInputs-1`:0][`$progByteCntWidth-1+1`:0]  extract_src;
+logic [`$evInputs-1`:0]                         extract_data_rdy;
+logic all_extract_data_rdy;
+
+logic [0:`2*$progBufBitWidth-1`]   concat_data;
+
+logic [`$hdrTypeWidth-1`:0]  curr_hdr_type;
+logic [7:0]                  curr_hdr_size;
+
+logic                                        ev_flush_nxt;
+
+////////////////////////////////////////
+// Module instantiations
+////////////////////////////////////////
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+// Record lookup requests
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        prev_data <= '0;
+        prev_pos <= '0;
+        extract_req <= '0;
+        curr_hdr_type <= '0;
+        curr_hdr_size <= '0;
+
+        ev_flush <= '0;
+        ev_flush_nxt <= '0;
+        //$display("%t: RESETTING EXTRACT STATE", $time);
+    end
+    else begin
+        if (do_lookup && rd_active) begin
+            extract_req <= '1;
+            prev_data <= buf_data[0];
+            prev_pos <= curr_pos;
+//; for (my $i = 0; $i < $evInputs; $i++) {
+            ev_src_int[`$i`] <= lt_extract_src[`$i`];
+            ev_dst_int[`$i`] <= lt_extract_dst[`$i`];
+//; }
+//; for (my $i = $numHdrIdent - 1; $i >= 0; $i--) {
+//;     my $prefix = ($i == $numHdrIdent - 1) ? '' : 'else ';
+            `$prefix`if (lt_found_hdr[`$i`]) begin
+                curr_hdr_type <= lt_found_hdr_type[`$i`];
+                curr_hdr_size <= lt_found_hdr_size[`$i`];
+            end
+//; }
+        end
+        else if (all_extract_data_rdy)
+            extract_req <= '0;
+
+        ev_flush_nxt <= rd_active & hi_pkt_done;
+        ev_flush <= ev_flush_nxt;
+    end
+end
+
+// FIXME: maybe deal with data past the end of packet?
+
+// Calculate the extract locations and extract ready
+//; my $allExtractRdyStr = '';
+//; for (my $i = 0; $i < $evInputs; $i++) {
+//;     $allExtractRdyStr .= " && " if ($i != 0);
+//;     $allExtractRdyStr .= "extract_data_rdy[$i]";
+assign extract_src[`$i`] = prev_pos[`$progByteCntWidth-1`:0] + ev_src_int[`$i`];
+assign extract_data_rdy[`$i`] =
+        extract_src[`$i`][`$progByteCntWidth`] == 0 ||
+        extract_src[`$i`][`$progByteCntWidth`] == 1 && buf_vld[0] ||
+        ev_dst_int[`$i`] == '1;
+assign ev_data[`$i`] = concat_data[extract_src[`$i`] * 8 +: 8];
+assign ev_addr[`$i`] = ev_dst_int[`$i`] != '1 ? ev_dst_int[`$i`] : '1;
+assign ev_wr_en[`$i`] = extract_req && all_extract_data_rdy && ev_dst_int[`$i`] != '1;
+
+//; }
+assign all_extract_data_rdy = `$allExtractRdyStr`;
+
+assign concat_data = {prev_data, buf_data[0]};
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+//; if ($debug >= 2) {
+integer i;
+logic extracting;
+
+always @(posedge clk)
+begin
+    if (extract_req && all_extract_data_rdy) begin
+        extracting = '0;
+        for (i = 0; i < `$evInputs`; i++) begin
+            if (ev_dst_int[i] != '1)
+                extracting = '1;
+        end
+
+        if (extracting) begin
+            $write("%t: Extract src: ", $time);
+            for (i = 0; i < `$evInputs`; i++) begin
+                if (ev_dst_int[i] != '1)
+                    $write(" %4d", extract_src[i]);
+            end
+            $write("\n");
+            $write("%t: Extract dest:", $time);
+            for (i = 0; i < `$evInputs`; i++) begin
+                if (ev_dst_int[i] != '1)
+                    $write(" %4d", ev_addr[i]);
+            end
+            $write("\n");
+            $write("%t: Extract data:", $time);
+            for (i = 0; i < `$evInputs`; i++) begin
+                if (ev_dst_int[i] != '1)
+                    $write("   %02x", ev_data[i]);
+            end
+            $write("\n");
+        end
+    end
+end
+//; }
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

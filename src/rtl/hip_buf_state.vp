@@ -1,0 +1,320 @@
+////////////////////////////////////////////////////////////////
+// hip_buf_state.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Buffer management state machine for programmable parser
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Width of buffered words (bytes)',
+//;                               min=>1 , max=>128);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $bufWords = parameter( name=>'BufWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of words to extract from the buffer',
+//;                               min=>2 , max=>8, step=>1);
+//; my $maxRdAmt = parameter( name=>'MaxRdAmt', val=>8,
+//;                               doc=>'!FUNCTIONAL! Maximum read amount (bytes)',
+//;                               min=>1 , max=>128);
+//;
+//; # Verify that the byte width is a power of two
+//; if (2 ** log2($wordByteWidth) != $wordByteWidth) {
+//;     $self->error("Word byte width must be a power of two. Specified: $wordByteWidth");
+//; }
+//;
+//; my $byteCntWidth = log2($wordByteWidth);
+//; my $rdWidth = log2($maxRdAmt);
+
+import parser_pkg::*;
+
+// Top-level parser
+module `mname()`
+(
+    // Buffer interface signals
+    input logic                         buf_empty,
+
+    output logic                        buf_rd_en,
+    input logic [`$wordBitWidth-1`:0]   buf_rd_data,
+    input logic [`$wordByteWidth-1`:0]  buf_rd_eop,
+
+    // Other state machine interfaces
+    output logic [`$bufWords-1`:0][`$wordBitWidth-1`:0]  buf_data,
+    output logic [`$bufWords-1`:0][`$wordByteWidth-1`:0] buf_eop,
+    output logic [`$bufWords-1`:0]                       buf_vld,
+
+    output logic [HDR_WIDTH-1:0]        curr_pos,
+
+    output logic                        rd_active,
+    output logic                        pkt_will_end,
+
+    // Lookup-specific interface
+    input logic                         lookup_rdy,
+    input logic                         lookup_skip_req,
+    input logic [`$rdWidth+1-1`:0]      lookup_rd_amt,
+
+    // Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic adv;
+
+logic [HDR_WIDTH-1:0]           curr_pos_nxt;
+logic [`$bufWords-1`:0][HDR_WIDTH-1:0] curr_word_start;
+logic [HDR_WIDTH-1:0]           bytes_read;
+
+logic [HDR_WIDTH-1:0]           pkt_end_pos;
+logic [`$byteCntWidth+1-1`:0]   valid_bytes;
+
+logic skip_to_end, skip_to_end_nxt;
+logic adv_via_skip;
+logic rd_en;
+logic [HDR_WIDTH-1:0] rd_dst;
+
+////////////////////////////////////////
+// Module instantiations
+////////////////////////////////////////
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+// Read data from the buffer
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        buf_vld[0] <= '0;
+        buf_vld[1] <= '0;
+    end
+    else begin
+        if (!buf_vld[0] || (buf_vld[0] && adv && !buf_vld[1]))
+        begin
+            buf_data[0] <= buf_rd_data;
+            buf_eop[0] <= buf_rd_eop;
+            buf_vld[0] <= !buf_empty;
+        end
+        else if (adv) begin
+            buf_data[0] <= buf_data[1];
+            buf_eop[0] <= buf_eop[1];
+            buf_vld[0] <= buf_vld[1];
+        end
+
+        if ((buf_vld[0] && !buf_vld[1] && !adv) || (buf_vld[0] && buf_vld[1] && adv)) begin
+            buf_data[1] <= buf_rd_data;
+            buf_eop[1] <= buf_rd_eop;
+            buf_vld[1] <= !buf_empty;
+        end
+        else if (adv) begin
+            buf_vld[1] <= '0;
+        end
+    end
+end
+
+always_comb
+begin
+    if (rst)
+        buf_rd_en = '0;
+    else begin
+        // Read from the buffer when it's not empty and either:
+        //    i) not all slots are currently filled
+        //   ii) the advance signal is asserted
+        buf_rd_en = !buf_empty && (!(&buf_vld) || adv);
+    end
+end
+
+// Track bytes read from the buffer
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        bytes_read <= '0;
+    end
+    else if (buf_rd_en) begin
+        // Actively reading data
+        if (adv && buf_vld[0] && |buf_eop[0])
+            // Reset the read count if we're advancing and the packet ends in the current word
+            bytes_read <= `fmtWidthVal($wordByteWidth)`;
+        else if (!(buf_vld[0] && |buf_eop[0]))
+            // Advance if we haven't hit the end of packet
+            bytes_read <= bytes_read + `fmtWidthVal($wordByteWidth)`;
+    end
+    else if (adv) begin
+        // No read, but pulling data from the nxt value
+        if (buf_vld[0] && |buf_eop[0])
+            bytes_read <= buf_vld[1] ? `fmtWidthVal($wordByteWidth)` : '0;
+    end
+end
+
+// Track word start locations
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        curr_word_start[0] <= '0;
+        curr_word_start[1] <= `fmtWidthVal($wordByteWidth)`;
+    end
+    else if (adv) begin
+        if (buf_vld[0] && |buf_eop[0]) begin
+            curr_word_start[0] <= '0;
+            curr_word_start[1] <= `fmtWidthVal($wordByteWidth)`;
+        end
+        else begin
+            curr_word_start[0] <= curr_word_start[1];
+            curr_word_start[1] <= curr_word_start[1] + `fmtWidthVal($wordByteWidth)`;
+        end
+    end
+end
+
+// Number of valid bytes in the current word
+always_comb
+begin
+//; for (my $i = 0; $i < $wordByteWidth; $i++) {
+//;     if ($i < $wordByteWidth - 1) {
+//; #    `$i == 0 ? 'unique' : '  else'` if (buf_eop[0][`$wordByteWidth - 1 - $i`]) valid_bytes = `$i + 1`;
+    `$i == 0 ? '' : '  else'` if (buf_eop[0][`$wordByteWidth - 1 - $i`]) valid_bytes = `$i + 1`;
+//;     } else {
+      else valid_bytes = `$i + 1`;
+//;     }
+//; }
+end
+
+// Where does the current packet end (if we're in the last word)
+assign pkt_end_pos = curr_word_start[0] + valid_bytes;
+
+// Advance the current word
+// Current word must be valid, and either:
+//   i) we're skipping
+//   ii) rd_en and the target location is in the next word
+//   iii) rd_en, in the last word, and reading past the end of the packet
+assign adv = buf_vld[0] && (adv_via_skip ||
+        rd_en && (rd_dst >= curr_word_start[1] || (|buf_eop[0] && rd_dst >= pkt_end_pos)));
+assign adv_via_skip = skip_to_end || lookup_skip_req;
+
+// Next position when reading lookup_rd_amt bytes
+assign rd_dst = curr_pos + lookup_rd_amt;
+
+
+// Read only if the other state machines are ready and either:
+//   i) the destination is within the bytes we've read or is the next byte
+//      we're reading (necessary for extraction) and all of the lookup bytes
+//      have been read
+//   ii) the packet ends in the current word
+assign rd_en = lookup_rdy && (rd_dst <= bytes_read || (buf_vld[0] && |buf_eop[0]));
+
+
+// Track the current processing location
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        curr_pos <= '0;
+        skip_to_end <= '0;
+    end
+    else begin
+        curr_pos <= curr_pos_nxt;
+        skip_to_end <= skip_to_end_nxt;
+    end
+end
+
+always_comb
+begin
+    curr_pos_nxt = curr_pos;
+    skip_to_end_nxt = skip_to_end;
+    pkt_will_end = '0;
+    rd_active = '0;
+
+    if (buf_vld[0] && |buf_eop[0] && curr_pos > pkt_end_pos) begin
+        // We've somehow skipped over the end of the packet!
+        curr_pos_nxt = '0;
+        skip_to_end_nxt = '0;
+        pkt_will_end = '1;
+        rd_active = '0;
+    end
+    else if (lookup_skip_req)
+    begin
+        if (buf_vld[0]) begin
+            // Advancing the current location
+            rd_active = '1;
+            if (|buf_eop[0]) begin
+                curr_pos_nxt = '0;
+                skip_to_end_nxt = '0;
+                pkt_will_end = '1;
+            end
+            else begin
+                curr_pos_nxt = curr_word_start[1];
+                skip_to_end_nxt = '1;
+            end
+        end
+        else begin
+            skip_to_end_nxt = '1;
+        end
+    end
+    else if (buf_vld[0] && (rd_en || skip_to_end)) begin
+        // We are advancing the current position
+        rd_active = '1;
+
+        if (|buf_eop[0] && (rd_dst >= pkt_end_pos || skip_to_end)) begin
+            // The packet ends in the current word and we're reading past the
+            // end of the packet/skipping to the end
+            curr_pos_nxt = '0;
+            skip_to_end_nxt = '0;
+            pkt_will_end = '1;
+        end
+        else if (skip_to_end) begin
+            // Read each word from the buffer until the end of packet
+            if (buf_vld[1] || !buf_empty)
+                curr_pos_nxt = curr_word_start[1];
+        end
+        else
+            // If we reach here we *must* be doing a read
+            curr_pos_nxt = rd_dst;
+    end
+end
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+//; if ($debug >= 2) {
+logic adv_d1, curr_vld_d1;
+
+always @(posedge clk)
+begin
+    adv_d1 <= adv;
+    curr_vld_d1 <= buf_vld[0];
+
+    // Display the data if we're shifted something new into the curr data word
+    if (buf_vld[0] && (adv_d1 || !curr_vld_d1)) begin
+        $display("%t: Bytes read: %2d   Curr data: %0`$wordByteWidth * 2`x   EOP: %0`$wordByteWidth`b   CV: %b   NV: %b", $time, bytes_read, buf_data[0], buf_eop[0], buf_vld[0], buf_vld[1]);
+    end
+
+    if (lookup_skip_req)
+        $display("%t: SKIP REQ", $time);
+    else if (skip_to_end)
+        $display("%t: SKIP IN PROGRESS", $time);
+
+    if (curr_pos != curr_pos_nxt) begin
+        $display("%t: Curr pos: %3d   Nxt pos: %3d   Rd amt: %3d", $time, curr_pos, curr_pos_nxt, lookup_rd_amt);
+    end
+end
+//; }
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

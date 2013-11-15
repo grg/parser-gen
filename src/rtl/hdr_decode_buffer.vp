@@ -1,0 +1,206 @@
+////////////////////////////////////////////////////////////////
+// hdr_decode_buffer.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Buffers input data
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser qw(log2 getBufRdWidth);
+//;
+//  PARAMETERS:
+//; my $wordByteWidth  = parameter( name=>'WordWidth', val=>4 ,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words' ,
+//;                               min=>1 , max=>128, step=>1 );
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $depth = parameter( name=>'Depth', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Depth of buffer (words)' ,
+//;                               min=>1 , max=>32);
+//; my $wideRead = parameter( name=>'WideRead', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Enable wide reads from the buffer' ,
+//;                               list=>[0, 1]);
+//; my $dblWideRead = parameter( name=>'DblWideRead', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Enable double-wide reads from the buffer' ,
+//;                               list=>[0, 1]);
+//; $wideRead |= $dblWideRead;
+//; my $widthMult = 1 + $wideRead + $dblWideRead;
+//; my $addrBits = log2($depth);
+//; my $addrWideBits = $addrBits + 1 > getBufRdWidth() ? $addrBits + 1 : getBufRdWidth();
+
+import parser_pkg::*;
+
+// Top-level parser
+module `mname()`
+(
+    // Write Signals
+    input logic                             pkt_wr_en,
+    input logic [`$wordBitWidth-1`:0]       pkt_data_in,
+    input logic [`$wordByteWidth-1`:0]      pkt_end_in,
+
+    // Read Signals
+    input logic                             pkt_rd_en,
+    input logic [BR_WIDTH-1:0]              pkt_rd_amt,
+    output logic [`$widthMult*$wordBitWidth-1`:0]   pkt_data_out,
+    output logic [`$widthMult*$wordByteWidth-1`:0]  pkt_end_out,
+
+    output logic                            empty,
+    output logic                            nearly_full,
+    output logic                            full,
+
+    // Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic [`$addrBits-1`:0]         wr_addr;
+//; for (my $i = 0; $i < $widthMult; $i++) {
+logic [`$addrBits-1`:0]         rd_addr_`$i`;
+//; }
+
+logic signed [BR_WIDTH-1:0]     occupancy;
+
+//; for (my $i = 0; $i < $widthMult; $i++) {
+logic [`$wordBitWidth-1`:0]     pkt_data_`$i`;
+logic [`$wordByteWidth-1`:0]    pkt_end_`$i`;
+//; }
+
+//; for (my $i = 0; $i < $widthMult; $i++) {
+logic [`$addrBits-1`:0]         rd_addr_`$i`_nxt;
+//;     if (2 ** $addrBits != $depth) {
+logic [`$addrWideBits-1`:0]       rd_addr_`$i`_raw_add;
+//;     }
+//; }
+
+
+////////////////////////////////////////
+// Module instantiations
+////////////////////////////////////////
+
+//; my $mem = generate('ram_multiport', 'input_buffer_mem',
+//;                     Width => $wordBitWidth + $wordByteWidth, Depth => $depth,
+//;                     WritePorts => 1, ReadPorts => $widthMult,
+//;                   );
+`$mem->instantiate()` (
+            .wr_en_0 (pkt_wr_en),
+            .wr_addr_0 (wr_addr),
+            .wr_data_0 ({pkt_end_in, pkt_data_in}),
+
+//; for (my $i = 0; $i < $widthMult; $i++) {
+            .rd_addr_`$i` (rd_addr_`$i`),
+            .rd_data_`$i` ({pkt_end_`$i`, pkt_data_`$i`}),
+
+//; }
+            .*
+    );
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        wr_addr <= '0;
+//; for (my $i = 0; $i < $widthMult; $i++) {
+        rd_addr_`$i` <= `($depth - $i) % $depth`;
+//; }
+
+        occupancy <= '0;
+    end
+    else begin
+        if (pkt_wr_en) begin
+            if (wr_addr == `$depth - 1`)
+                wr_addr <= '0;
+            else
+                wr_addr <= wr_addr + `$addrBits`'d1;
+        end
+
+        if (pkt_rd_en) begin
+//; for (my $i = 0; $i < $widthMult; $i++) {
+            rd_addr_`$i` <= rd_addr_`$i`_nxt;
+//; }
+        end
+
+        if (pkt_wr_en && !pkt_rd_en)
+            occupancy <= occupancy + 1;
+        else if (!pkt_wr_en && pkt_rd_en)
+            occupancy <= occupancy - pkt_rd_amt;
+        else if (pkt_wr_en && pkt_rd_en)
+            occupancy <= occupancy - pkt_rd_amt + 1;
+    end
+end
+
+//; if (2 ** $addrBits != $depth) {
+//;     my $extWidth = $addrWideBits - getBufRdWidth();
+//;     $extWidth = 1 if $extWidth < 1;
+wire [`$extWidth-1`:0] pkt_rd_amt_sign_ext = pkt_rd_amt[BR_WIDTH-1] ? '1 : '0;
+//; }
+always_comb
+begin
+//; for (my $i = 0; $i < $widthMult; $i++) {
+//;     if (2 ** $addrBits != $depth) {
+    rd_addr_`$i`_raw_add = rd_addr_`$i` + {pkt_rd_amt_sign_ext, pkt_rd_amt};
+    if (rd_addr_`$i`_raw_add[`$addrWideBits-1`])
+        rd_addr_`$i`_nxt = `$addrWideBits`'d`$depth` - ((-rd_addr_`$i`_raw_add) % `$addrWideBits`'d`$depth`);
+    else if (rd_addr_`$i`_raw_add >= `$depth`)
+        rd_addr_`$i`_nxt = rd_addr_`$i`_raw_add % `$addrWideBits`'d`$depth`;
+    else
+        rd_addr_`$i`_nxt = rd_addr_`$i`_raw_add;
+//;     } else {
+    rd_addr_`$i`_nxt = rd_addr_`$i` + pkt_rd_amt;
+//;     }
+//; }
+end
+
+//; my $pktDataOut = "";
+//; my $pktEndOut = "";
+//; for (my $i = 0; $i < $widthMult; $i++) {
+//;     $pktDataOut .= ", " if $i > 0;
+//;     $pktEndOut .= ", " if $i > 0;
+//;     $pktDataOut .= "pkt_data_" . ($widthMult - 1 - $i);
+//;     $pktEndOut .= "pkt_end_" . ($widthMult - 1 - $i);
+//; }
+assign pkt_data_out = {`$pktDataOut`};
+assign pkt_end_out = {`$pktEndOut`};
+
+assign empty = occupancy <= 0;
+assign nearly_full = occupancy == `$depth - 1`;
+assign full = occupancy == `$depth`;
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+// Check for memory overflow
+always @(posedge clk)
+begin
+    if (full && pkt_wr_en && !pkt_rd_en) begin
+        $display("%t: =================================================================================================", $time);
+        $display("%t: %m: ERROR: Buffer overflow: depth: %2d  wr_pos: %2d  rd_pos: %2d  occupancy: %2d", $time, `$depth`, wr_addr, rd_addr_0, occupancy);
+        $display("%t: =================================================================================================", $time);
+    end
+
+    if (empty && pkt_rd_en) begin
+        $display("%t: =================================================================================================", $time);
+        $display("%t: %m: ERROR: Buffer underflow: depth: %2d  wr_pos: %2d  rd_pos: %2d  occupancy: %2d", $time, `$depth`, wr_addr, rd_addr_0, occupancy);
+        $display("%t: =================================================================================================", $time);
+    end
+end
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`
+
+

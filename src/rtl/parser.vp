@@ -1,0 +1,552 @@
+////////////////////////////////////////////////////////////////
+// parser.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Main parser module
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use ParserJSONImport;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $pgName = parameter( name=>'ParseGraph', val=>'',
+//;                               doc=>'!FUNCTIONAL! JSON file containing header descriptions');
+//; my $progEnable = parameter( name=>'EnableProgParser', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable programmable parser',
+//;                               list=>[0, 1]);
+//; my $tcamTableFile = parameter(name=>'TCAMTableFile', val=>'',
+//;                               doc=>'!FUNCTIONAL! File containing description of TCAM entries [Override]');
+//; my $progBufByteWidth = parameter( name=>'ProgBufWordWidth', val=>16,
+//;                               doc=>'!FUNCTIONAL! Width of programmable buffer (bytes)',
+//;                               min=>1 , max=>128, step=>1);
+//; my $progBufBitWidth = $progBufByteWidth * 8;
+//;
+//; my $progLookupWords = parameter( name=>'ProgLookupWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of lookup words in programmable parser',
+//;                               min=>1 , max=>16, step=>1);
+//; my $progLookupByteWidth = parameter( name=>'ProgLookupWordWidth', val=>2,
+//;                               doc=>'!FUNCTIONAL! Width of programmable lookup word (bytes)',
+//;                               min=>1 , max=>16, step=>1);
+//; my $progLookupBitWidth = $progLookupByteWidth * 8;
+//;
+//; my $evBitWidth = parameter(name=>'ExtractVectorWidth', val=>"4096",
+//;                           doc=>'!FUNCTIONAL! Extract field vector width (bits)');
+//; my $evByteWidth = $evBitWidth / 8;
+//; my $evInputs = parameter(name=>'NumExtractVectorInputs', val=>"12",
+//;                           doc=>'!FUNCTIONAL! Number of single-byte inputs to the extract field vector');
+//;
+//; my $maxRdAmt = parameter( name=>'MaxRdAmt', val=>$progBufByteWidth - 1,
+//;                               doc=>'!FUNCTIONAL! Maximum read amount (bytes)',
+//;                               min=>1 , max=>128);
+//;
+//;
+//; my $bufWords = parameter( name=>'BufWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of words to extract from the buffer',
+//;                               min=>2 , max=>8, step=>1);
+//; my $progStateWidth = parameter( name=>'ProgStateWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Width of state variable (bits)',
+//;                               min=>1 , max=>16);
+//; my $progBufDepth = parameter( name=>'ProgBufDepth', val=>2,
+//;                               doc=>'!FUNCTIONAL! Depth of programmable buffer (words)',
+//;                               min=>1 , max=>16, step=>1);
+//; my $resultVectors = parameter(name=>'NumResultVectors', val=>"1",
+//;                           doc=>'!FUNCTIONAL! Number of result vectors');
+//; my $numHdrIdent = parameter(name=>'NumHdrIdent', val=>"3",
+//;                           doc=>'!FUNCTIONAL! Number of headers identified in a single cycle');
+//; my $progMaxHdrs = parameter( name=>'ProgMaxHdrs', val=>32,
+//;                               doc=>'!FUNCTIONAL! Maximum number of headers',
+//;                               min=>1 , max=>128, step=>1);
+//;
+//; # Verify the sanity of inputs
+//; if ($evBitWidth % 8 != 0) {
+//;     $self->error("Extract field vector width must be a multiple of 8 bits. Specified: $evBitWidth")
+//; }
+//; my $rdWidth = log2($maxRdAmt);
+//;
+//; my $progByteCntWidth = log2($progBufByteWidth);
+//; my $evDstWidth = log2($evBitWidth);
+//;
+//; my $hdrTypeWidth = log2($progMaxHdrs);
+//;
+//; my $useDblWide = 1;
+//; my $widthMult = $useDblWide ? 2 : 1;
+//;
+//; # Print a summary of the parser options
+//; print STDOUT "\n\n";
+//; print STDOUT "Parser options:\n";
+//; print STDOUT "  Word width: $wordByteWidth B\n";
+//; print STDOUT "  Header file: $pgName\n";
+//; print STDOUT "  Double-wide requested: " . ($useDblWide ? "yes" : "no") . "\n";
+//;
+//; # Header file processing
+//; setWordWidth($wordByteWidth);
+//; my ($headers, $firstHdr, $hdrSeqs) = readJSONHeaders($pgName);
+//; setHeaders($headers);
+//; setHdrSeqs($hdrSeqs);
+//;
+//; # Calculate the locations/sequences of parsers
+//; # (need to do this now to identify the maximum parsers in a single cycle)
+//; my ($parsers, $parserSeqs, $wideParsers, $maxLag, $maxLagSeq) = calcParserLocs($hdrSeqs, $useDblWide);
+//; my ($worstPktParseCycles, $worstPktRxCycles, $worstPktParseSeq) = getWorstPktInfo();
+//; my ($worstHdrParseCycles, $worstHdrRxCycles, $worstHdrParseSeq) = getWorstHdrInfo();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my $maxHdrSeqLen = getMaxHdrSeqLen();
+//; my $maxHdrSeq = getMaxHdrSeq();
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = calcExtractTables();
+//; my $destBits = log2($totalExtractBytes);
+//;
+//; # Verify that we need dbl wide if it's enabled
+//; if ($useDblWide and $maxLag < $wordByteWidth) {
+//;     $useDblWide = 0;
+//;     $widthMult = 1;
+//;     print STDOUT "Double-wide parsing not needed, disabling...\n\n";
+//; }
+//;
+//; # Display diagnostics messasge about worst-case sequence
+//; my $diagMsg = "\n\nParse graph summary:\n";
+//; $diagMsg .= "  Maximum lag: $maxLag\n";
+//; $diagMsg .= "  Maximum lag sequence:";
+//; for (my $i = 0; $i < scalar(@$maxLagSeq); $i++) {
+//;     my $hdrName = $maxLagSeq->[$i]->{'name'};
+//;     my $hdrPos = $maxLagSeq->[$i]->{'pos'};
+//;     my $hdrLen = $maxLagSeq->[$i]->{'len'};
+//;     $diagMsg .= "\n           " if $i != 0;
+//;     $diagMsg .= " $hdrName \@ $hdrPos (len: $hdrLen)";
+//; }
+//; $diagMsg .= "\n";
+//; $diagMsg .= "\n";
+//; $diagMsg .= "  Maximum length: $maxHdrSeqLen\n";
+//; $diagMsg .= "  Maximum length sequence:";
+//; for (my $i = 0; $i < scalar(@$maxHdrSeq); $i++) {
+//;     my $hdrName = $maxHdrSeq->[$i]->{'name'};
+//;     my $hdrPos = $maxHdrSeq->[$i]->{'pos'};
+//;     my $hdrLen = $maxHdrSeq->[$i]->{'len'};
+//;     $diagMsg .= "\n           " if $i != 0;
+//;     $diagMsg .= " $hdrName \@ $hdrPos (len: $hdrLen)";
+//; }
+//; $diagMsg .= "\n";
+//; $diagMsg .= "\n";
+//; $diagMsg .= "  Worst-case whole packet sequence:";
+//; my $seqLen = 0;
+//; for (my $i = 0; $i < scalar(@$worstPktParseSeq); $i++) {
+//;     my $hdrName = $worstPktParseSeq->[$i]->{'name'};
+//;     my $hdrPos = $worstPktParseSeq->[$i]->{'pos'};
+//;     my $hdrLen = $worstPktParseSeq->[$i]->{'len'};
+//;     $seqLen += $hdrLen;
+//;     $diagMsg .= "\n           " if $i != 0;
+//;     $diagMsg .= " $hdrName \@ $hdrPos (len: $hdrLen)";
+//; }
+//; $diagMsg .= "\n";
+//; $diagMsg .= "  Worst-case whole packet sequence length: $seqLen\n";
+//; $diagMsg .= "  Worst-case whole packet parse cycles: $worstPktParseCycles\n";
+//; $diagMsg .= "  Worst-case whole packet RX cycles: $worstPktRxCycles\n";
+//; $diagMsg .= "  Worst-case whole packet parse-to-RX cycles: ";
+//; if ($worstPktRxCycles > 0) {
+//;   $diagMsg .= sprintf("%1.3f\n", $worstPktParseCycles / $worstPktRxCycles);
+//; } else {
+//;   $diagMsg .= "INF\n";
+//; }
+//; $diagMsg .= "\n";
+//; $diagMsg .= "  Worst-case header only sequence:";
+//; $seqLen = 0;
+//; for (my $i = 0; $i < scalar(@$worstHdrParseSeq); $i++) {
+//;     my $hdrName = $worstHdrParseSeq->[$i]->{'name'};
+//;     my $hdrPos = $worstHdrParseSeq->[$i]->{'pos'};
+//;     my $hdrLen = $worstHdrParseSeq->[$i]->{'len'};
+//;     $seqLen += $hdrLen;
+//;     $diagMsg .= "\n           " if $i != 0;
+//;     $diagMsg .= " $hdrName \@ $hdrPos (len: $hdrLen)";
+//; }
+//; $diagMsg .= "\n";
+//; $diagMsg .= "  Worst-case header only sequence length: $seqLen\n";
+//; $diagMsg .= "  Worst-case header only parse cycles: $worstHdrParseCycles\n";
+//; $diagMsg .= "  Worst-case header only RX cycles: $worstHdrRxCycles\n";
+//; $diagMsg .= "  Worst-case header only parse-to-RX cycles: ";
+//; if ($worstHdrRxCycles > 0) {
+//;   $diagMsg .= sprintf("%1.3f\n", $worstHdrParseCycles / $worstHdrRxCycles);
+//; } else {
+//;   $diagMsg .= "INF\n";
+//; }
+//; $diagMsg .= "\nDouble-wide parsing: " . ($useDblWide ? "ENABLED" : "DISABLED") . "\n";
+//; if ($useDblWide) {
+//;     $diagMsg .= "  Double-wide parsers:";
+//;     my $cnt = 0;
+//;     foreach my $offset (sort(keys(%$wideParsers))) {
+//;         foreach my $hdrName (sort(keys(%{$wideParsers->{$offset}}))) {
+//;             $diagMsg .= "\n           " if $cnt != 0;
+//;             $diagMsg .= " $hdrName \@ $offset";
+//;             $cnt++;
+//;         }
+//;     }
+//;     $diagMsg .= "\n";
+//; }
+//; $diagMsg .= "\n";
+//; print STDOUT $diagMsg;
+//;
+//; # Calculate the interface arrays
+//; calcIfcArrays();
+//;
+//; # Programmable extract updates
+//; if ($progEnable) {
+//;     setProgExtractWidth($evInputs);
+//;     setProgLookupInputs($progLookupWords);
+//;     setProgLookupWidth($progLookupByteWidth);
+//;     setProgMaxRange($progBufByteWidth);
+//;     setProgStateWidth($progStateWidth);
+//;
+//;     my ($numTblEntries, $numTblUniqueEntries, $numTblExtraEntries, $tblEntries, $tblFirstLookupWords) = calcProgLookupTable();
+//;
+//;     # Display diagnostics messasge about programmable extract table
+//;     print STDOUT "\n";
+//;     print STDOUT "Programmable parser table entries: $numTblEntries\n";
+//;     print STDOUT "Programmable parser UNIQUE table entries: $numTblUniqueEntries\n";
+//;     print STDOUT "Programmable parser extra table entries: $numTblExtraEntries\n";
+//;     print STDOUT "\n\n";
+//;
+//;     # Generate the TCAM table file name if necessary
+//;     if ($tcamTableFile eq '') {
+//;         $tcamTableFile = $pgName;
+//;         $tcamTableFile =~ s/\.json$//;
+//;         $tcamTableFile .= sprintf("-w%03d-ms%03d-l%02d-lw%02d-flaz%1d-e%1d-eb%02d.tcam",
+//;                                     $wordByteWidth,
+//;                                     $maxRdAmt,
+//;                                     $progLookupWords,
+//;                                     $progLookupByteWidth,
+//;                                     0,
+//;                                     1,
+//;                                     $evInputs,
+//;                                     );
+//;
+//;         # Verify that the file exists
+//;         unless (-e expandFilename($tcamTableFile)) {
+//;             print STDERR "No TCAM table file specified. Using: $tcamTableFile\n";
+//;             print STDERR "(Derived from header file: $pgName)\n\n";
+//;             print STDERR "Generate this with:\n";
+//;             # FIXME: Generate message here
+//;             print STDERR "GENERATE MESSAGE HERE\n";
+//;             print STDERR "\n";
+//;         }
+//;     } else {
+//;         # Verify that the file exists
+//;         unless (-e expandFilename($tcamTableFile)) {
+//;             print STDERR "Invalid TCAM table file specified. File does not exist: $tcamTableFile\n";
+//;             print STDERR "Exiting...\n";
+//;             print STDERR "\n";
+//;         }
+//;     }
+//;
+//;     setTCAMTableFile($tcamTableFile);
+//;     print STDOUT "Programmble TCAM table content: $tcamTableFile\n";
+//;     print STDOUT "\n\n";
+//;
+//;     # Work out what the first lookup is
+//;     open TCAM_FILE, "<", expandFilename($tcamTableFile) or die $!;
+//;     my $line = <TCAM_FILE>;
+//;     my $entry = parseFirstLookupEntry($line);
+//;     setProgFirstLookupWordsNew($entry->{'LOOKUP_OFFSETS'});
+//;     close TCAM_FILE;
+//; }
+
+//; my $pkg_obj = generate_base('parser_pkg', 'my_parser_pkg', WordWidth => $wordByteWidth);
+import parser_pkg::*;
+
+
+// Top-level parser
+module `mname()`
+(
+    //Input Signals
+    input logic [ `$wordBitWidth-1` : 0]    pkt_data,
+    input logic                             pkt_data_vld,
+    input logic [ `$wordByteWidth-1` : 0]   pkt_end,
+
+    //Output Signals
+    output logic [0:`$maxParserSeqLen-1`]                found_hdr,
+    output hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type,
+    output logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos,
+
+    output logic                                         pkt_done,
+
+    output logic [0:`$evBitWidth-1`]        extract_vector,
+    output logic [0:`$evByteWidth-1`]       extract_vector_vld,
+    output logic                            extract_vector_rdy,
+
+//; if ($progEnable) {
+    // External lookup table interface (programmable RAM/TCAM)
+    output logic [7:0]                                          lt_curr_state,
+    output logic [`$progLookupWords*$progLookupBitWidth-1`:0]   lt_lookup_data,
+
+    input logic [7:0]                                               lt_nxt_state,
+    input logic [`$rdWidth+1-1`:0]                                  lt_rd_amt,
+    input logic [`$progLookupWords-1`:0][`$progByteCntWidth-1`:0]   lt_rd_offset,
+
+    input logic [`$evInputs-1`:0][`$progByteCntWidth-1`:0]  lt_extract_src,
+    input logic [`$evInputs-1`:0][`$evDstWidth-1`:0]        lt_extract_dst,
+
+    input logic [`$numHdrIdent-1`:0]                        lt_found_hdr,
+    input logic [`$numHdrIdent-1`:0][`$hdrTypeWidth-1`:0]   lt_found_hdr_type,
+    input logic [`$numHdrIdent-1`:0][`$progByteCntWidth-1`:0] lt_found_hdr_pos,
+    input logic [`$numHdrIdent-1`:0][7:0]                   lt_found_hdr_size,
+//; }
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+//; if (!$progEnable) {
+logic [HDR_WIDTH-1:0]           decode_proc_pos;
+
+logic                           fe_pkt_done;
+logic                           fe_pkt_done_d1;
+logic                           fe_pkt_done_d2;
+//; } else {
+logic [HDR_WIDTH-1:0]           curr_pos;
+
+logic                           rd_active;
+logic                           do_lookup;
+
+logic [`$bufWords-1`:0][ `$progBufBitWidth-1` : 0]  buf_data;
+logic [`$bufWords-1`:0]                          buf_vld;
+logic [`$bufWords-1`:0][ `$progBufByteWidth-1` : 0] buf_eop;
+//; }
+
+logic                           hi_pkt_done;
+
+logic [`$evInputs-1`:0][`$evDstWidth-1`:0]  ev_addr;
+logic [`$evInputs-1`:0][7:0]                ev_data;
+logic [`$evInputs-1`:0]                     ev_wr;
+
+logic [ `$wordBitWidth-1` : 0]              pkt_data_out;
+logic                                       pkt_data_vld_out;
+logic [ `$wordByteWidth-1` : 0]             pkt_end_out;
+
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0]   extract_target;
+
+
+////////////////////////////////////////
+// Module instantiation
+////////////////////////////////////////
+
+//; # NON-PROGRAMMABLE PARSER
+//; if (!$progEnable) {
+//;
+//;     my $hdr_ident = generate('hdr_ident_fixed', 'hdr_ident',
+//;                                 WordWidth => $wordByteWidth,
+//;                                 UseDblWide => $useDblWide,
+//;                                 Debug => $debug,
+//;                         );
+//;
+//;     my $field_extract = generate('field_extract_fixed', 'field_extract',
+//;                                  WordWidth => $wordByteWidth,
+//;                                  Debug => $debug,
+//;                         );
+//;
+// Header identification
+`$hdr_ident->instantiate()`
+(
+    .pkt_data(pkt_data),
+    .pkt_data_vld(pkt_data_vld),
+    .pkt_end(pkt_end),
+    .found_hdr(found_hdr),
+    .found_hdr_type(found_hdr_type),
+    .found_hdr_pos(found_hdr_pos),
+    .pkt_done(hi_pkt_done),
+    .curr_proc_pos(decode_proc_pos),
+    .clk(clk),
+    .rst(rst)
+);
+
+assign pkt_done = hi_pkt_done;
+
+// Field extraction
+`$field_extract->instantiate()`
+(
+    .pkt_data           (pkt_data),
+    .pkt_data_vld       (pkt_data_vld),
+    .pkt_end            (pkt_end),
+    .found_hdr          (found_hdr),
+    .found_hdr_type     (found_hdr_type),
+    .found_hdr_pos      (found_hdr_pos),
+    .decode_proc_pos    (decode_proc_pos),
+
+    .pkt_done           (hi_pkt_done),
+    .pkt_data_out       (pkt_data_out),
+    .pkt_data_vld_out   (pkt_data_vld_out),
+    .pkt_end_out        (pkt_end_out),
+
+    .extract_target     (extract_target),
+    .fe_pkt_done        (fe_pkt_done),
+
+    .clk                (clk),
+    .rst                (rst)
+);
+
+//; } else {
+//;     # PROGRAMMABLE PARSER ENABLED
+//;
+//; my $hdr_ident = generate('hdr_ident_prog', 'hdr_ident',
+//;                             WordWidth => $wordByteWidth,
+//;                             BufWords => $bufWords,
+//;                             ProgBufWordWidth => $progBufByteWidth,
+//;                             ProgBufDepth => $progBufDepth,
+//;                             ProgLookupWordWidth => $progLookupByteWidth,
+//;                             ProgLookupWords => $progLookupWords,
+//;                             ExtractVectorWidth => $evBitWidth,
+//;                             NumExtractVectorInputs => $evInputs,
+//;                             NumHdrIdent => $numHdrIdent,
+//;                             ProgMaxHdrs => $progMaxHdrs,
+//;                             ProgStateWidth => $progStateWidth,
+//;                             MaxRdAmt => $maxRdAmt,
+//;                             Debug => $debug,
+//;                     );
+//;
+//; my $field_extract = generate('field_extract_prog', 'field_extract',
+//;                             BufWords => $bufWords,
+//;                             ProgBufWordWidth => $progBufByteWidth,
+//;                             ExtractVectorWidth => $evBitWidth,
+//;                             NumExtractVectorInputs => $evInputs,
+//;                             NumHdrIdent => $numHdrIdent,
+//;                             ProgMaxHdrs => $progMaxHdrs,
+//;                             Debug => $debug,
+//;                     );
+
+// Header identification
+`$hdr_ident->instantiate()`
+(
+    //Input Signals
+    .pkt_data       (pkt_data),
+    .pkt_data_vld   (pkt_data_vld),
+    .pkt_end        (pkt_end),
+
+    .hi_pkt_done    (hi_pkt_done),
+
+    .curr_pos       (curr_pos),
+
+    .rd_active      (rd_active),
+    .do_lookup      (do_lookup),
+
+    .buf_data       (buf_data),
+    .buf_vld        (buf_vld),
+    .buf_eop        (buf_eop),
+
+    // Lookup table interface
+    .lt_curr_state  (lt_curr_state),
+    .lt_lookup_data (lt_lookup_data),
+
+    .lt_nxt_state   (lt_nxt_state),
+    .lt_rd_amt      (lt_rd_amt),
+    .lt_rd_offset   (lt_rd_offset),
+
+    //Global Signals
+    .clk            (clk),
+    .rst            (rst)
+);
+
+// Field extraction
+`$field_extract->instantiate()`
+(
+    // Main state machine interface
+    .buf_data   (buf_data),
+    .buf_eop   (buf_eop),
+    .buf_vld   (buf_vld),
+
+    .curr_pos   (curr_pos),
+
+    .rd_active   (rd_active),
+    .hi_pkt_done   (hi_pkt_done),
+
+    // Data from lookup engine
+    .do_lookup   (do_lookup),
+
+    // Data from lookup engine
+    .lt_extract_src   (lt_extract_src),
+    .lt_extract_dst   (lt_extract_dst),
+
+    .lt_found_hdr   (lt_found_hdr),
+    .lt_found_hdr_type   (lt_found_hdr_type),
+    .lt_found_hdr_pos   (lt_found_hdr_pos),
+    .lt_found_hdr_size   (lt_found_hdr_size),
+
+    // Data to extract vector
+    .ev_data   (ev_data),
+    .ev_addr   (ev_addr),
+    .ev_wr_en   (ev_wr),
+    .ev_flush   (extract_vector_rdy),
+
+    // Global Signals
+    .clk   (clk),
+    .rst   (rst)
+);
+//; }
+
+
+// Field output vector
+//; my $pktHdrVector = generate('pkt_hdr_vector', 'pkt_hdr_vector',
+//;                             Width=>$evBitWidth,
+//;                             NumInputs=>$evInputs,
+//;                             NumVectors=>$resultVectors,
+//;                             Debug => $debug,
+//;                             );
+`$pktHdrVector->instantiate()`
+(
+    .fields     (extract_vector),
+    .fields_vld (extract_vector_vld),
+
+    .dst_addr   (ev_addr),
+    .dst_data   (ev_data),
+    .dst_wr     (ev_wr),
+
+    .flush      (extract_vector_rdy),
+
+    .clk        (clk),
+    .rst        (rst)
+);
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+//; if (!$progEnable) {
+assign extract_vector_rdy = fe_pkt_done_d1 && ! fe_pkt_done_d2;
+always_ff @(posedge clk) begin
+    fe_pkt_done_d1 <= fe_pkt_done;
+    fe_pkt_done_d2 <= fe_pkt_done_d1;
+end
+
+always_comb
+begin
+//;     for (my $i = 0; $i < $evInputs && $i < $wordByteWidth; $i++) {
+    ev_addr[`$i`] = extract_target[`$i`] == 0 ? '1 : extract_target[`$i`] - 1;
+    ev_data[`$i`] = pkt_data_out[`$wordBitWidth - $i * 8 - 1` -: 8];
+    ev_wr[`$i`] = pkt_data_vld_out && extract_target[`$i`] != 0;
+//;     }
+end
+//; }
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

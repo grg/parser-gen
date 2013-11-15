@@ -1,0 +1,267 @@
+////////////////////////////////////////////////////////////////
+// fef_buf_state.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Buffer control state machine for field extraction (fixed).
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use ParserJSONImport;
+//; use List::Util;
+//;
+//; # PARAMETERS:
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = calcExtractTables();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//;
+//; my $destBits = log2($totalExtractBytes);
+//; my $tableDepthBits = log2($totalExtractEntries);
+//;
+//; my $numHeaders = numHeaders();
+//;
+//; my $offsetBits = log2($wordByteWidth);
+//; my $extEntryWidthBits = log2($wordByteWidth + 1);
+//;
+//; # FIXME: This should probably be a function
+//; my $totalHeaders = $numHeaders + 1;
+//; my $hdrCntWidth = POSIX::ceil(log($totalHeaders) / log(2));
+
+
+
+//;
+//; my $foundCntWidth = log2($maxParserSeqLen + 1);
+
+
+import parser_pkg::*;
+
+module `mname()`
+(
+    // Packet buffer interface
+    output logic                            pkt_buf_rd_en,
+    input logic                             pkt_buf_empty,
+    input logic [ `$wordByteWidth-1` : 0]   pkt_buf_eop,
+
+    // Found header buffer interface
+    input logic [0:`$maxParserSeqLen-1`]                found_hdr_buf_vld,
+    input hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_buf_type,
+    input logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_buf_pos,
+
+    output logic                                        found_hdr_buf_rd_en,
+    output logic [`$hdrCntWidth-1`:0]                   found_hdr_buf_rd_amt,
+
+    // Extract ROM interface
+    output logic[-1:`$maxParserSeqLen-1`][`$tableDepthBits-1`:0]    extract_rd_addr,
+
+    input logic[-1:`$maxParserSeqLen-1`][`$tableDepthBits-1`:0]     extract_nxt_addr,
+    input logic[-1:`$maxParserSeqLen-1`][`$extEntryWidthBits-1`:0]  extract_entry_width,
+
+    // Output
+    output logic [HDR_WIDTH-1:0]            curr_pos,
+    output logic [`$offsetBits-1` : 0]      curr_offset,
+    output logic [`$tableDepthBits-1`:0]    curr_rd_addr,
+    output logic                            pkt_done,
+
+    output logic [0:`$maxParserSeqLen-1`]   found_in_curr,
+    output logic                            any_found_in_curr,
+    output logic [`$foundCntWidth-1`:0]     last_found_in_curr,
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+const logic [`$tableDepthBits-1`:0] HDR_DONE = 0;
+
+
+logic [`$tableDepthBits-1`:0]   curr_rd_addr_nxt;
+logic                           pkt_done_nxt;
+logic                           pkt_finished;
+logic                           pkt_finished_nxt;
+
+logic [HDR_WIDTH-1:0]           curr_pos_nxt;
+logic [HDR_WIDTH-1:0]           next_pos;
+logic [HDR_WIDTH-1:0]           next_pos_nxt;
+
+logic [`$offsetBits-1` : 0]     curr_offset_nxt;
+
+
+////////////////////////////////////////
+// Instantiations
+////////////////////////////////////////
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        curr_rd_addr <= HDR_DONE;
+        pkt_done <= '0;
+        pkt_finished <= '0;
+
+        curr_pos <= '0;
+        next_pos <= `$wordByteWidth`;
+
+        curr_offset <= '0;
+    end
+    else begin
+        curr_rd_addr <= curr_rd_addr_nxt;
+        pkt_done <= pkt_done_nxt;
+        pkt_finished <= pkt_finished_nxt;
+
+        curr_pos <= curr_pos_nxt;
+        next_pos <= next_pos_nxt;
+
+        curr_offset <= curr_offset_nxt;
+    end
+end
+
+assign extract_rd_addr[-1] = curr_rd_addr;
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+assign extract_rd_addr[`$i`] = found_hdr_buf_type[`$i`];
+//; }
+
+always_comb
+begin
+    pkt_buf_rd_en = '0;
+    found_hdr_buf_rd_en = '0;
+    found_hdr_buf_rd_amt = '0;
+
+    curr_rd_addr_nxt = curr_rd_addr;
+    pkt_done_nxt = pkt_done;
+    pkt_finished_nxt = '0;
+
+    curr_pos_nxt = curr_pos;
+    next_pos_nxt = next_pos;
+
+    curr_offset_nxt = curr_offset;
+
+    // Assumptions/restrictions:
+    //   - curr_rd_addr will only be set when we are *in* the header
+    if (pkt_done) begin
+        if (!pkt_buf_empty || pkt_finished) begin
+            pkt_buf_rd_en =  !pkt_finished;
+
+            if (|pkt_buf_eop || pkt_finished) begin
+                curr_rd_addr_nxt = HDR_DONE;
+                pkt_done_nxt = '0;
+
+                curr_pos_nxt = '0;
+                next_pos_nxt = `$wordByteWidth`;
+
+                curr_offset_nxt = '0;
+            end
+            else begin
+                curr_pos_nxt = curr_pos + `$wordByteWidth`;
+                next_pos_nxt = next_pos + `$wordByteWidth`;
+            end
+        end
+    end
+    else begin
+        // Can't read data if there's nothing in the packet buffer
+        if (!pkt_buf_empty) begin
+            if (any_found_in_curr) begin
+                // There's a new header in the current word
+                curr_rd_addr_nxt = extract_nxt_addr[last_found_in_curr];
+                curr_offset_nxt = found_hdr_buf_pos[last_found_in_curr] - curr_pos;
+                found_hdr_buf_rd_en = 1;
+                found_hdr_buf_rd_amt = last_found_in_curr + 1;
+
+                // Handle reaching the end of the packet
+                pkt_done_nxt = found_hdr_buf_type[last_found_in_curr] == HDR_DONE;
+                pkt_finished_nxt = found_hdr_buf_type[last_found_in_curr] == HDR_DONE && |pkt_buf_eop;
+                //if (found_hdr_buf_type[last_found_in_curr] == HDR_DONE) begin
+                //    // Are we currently processing the last word?
+                //    if (|pkt_buf_eop) begin
+                //        curr_rd_addr_nxt = HDR_DONE;
+                //        pkt_done_nxt = '0;
+
+                //        curr_pos_nxt = '0;
+                //        next_pos_nxt = `$wordByteWidth`;
+
+                //        curr_offset_nxt = '0;
+                //    end
+                //    else begin
+                //        pkt_done_nxt = 1;
+                //    end
+                //end
+
+                if (next_pos - found_hdr_buf_pos[last_found_in_curr] <= extract_entry_width[last_found_in_curr] ||
+                            found_hdr_buf_type[last_found_in_curr] == HDR_DONE) begin
+                    // Advance the buffers only if the last found header extends
+                    // beyond the current word or if it's the last header
+                    pkt_buf_rd_en = 1;
+                    //if (found_hdr_buf_type[last_found_in_curr] != HDR_DONE || ! (|pkt_buf_eop)) begin
+                        curr_pos_nxt = curr_pos + `$wordByteWidth`;
+                        next_pos_nxt = next_pos + `$wordByteWidth`;
+                    //end
+                end
+            end
+            else if (curr_rd_addr != HDR_DONE) begin
+                // Currently processing a header
+                curr_rd_addr_nxt = extract_nxt_addr[-1];
+
+                if (`$wordByteWidth` - curr_offset <= extract_entry_width[-1] || found_hdr_buf_vld[0]) begin
+                    // Advance the pkt buffer only if the current header
+                    // extends beyond the current word of if another header
+                    // has been found
+                    pkt_buf_rd_en = 1;
+                    curr_pos_nxt = curr_pos + `$wordByteWidth`;
+                    next_pos_nxt = next_pos + `$wordByteWidth`;
+                end
+            end
+            else if (found_hdr_buf_vld[0]) begin
+                // The first new header is in a word we haven't yet got to. So
+                // advance to it.
+                pkt_buf_rd_en = 1;
+                curr_pos_nxt = curr_pos + `$wordByteWidth`;
+                next_pos_nxt = next_pos + `$wordByteWidth`;
+            end
+        end
+    end
+end
+
+//; for (my $i = 0; $i < $maxParserSeqLen; $i++) {
+assign found_in_curr[`$i`] = found_hdr_buf_vld[`$i`] && found_hdr_buf_pos[`$i`] < next_pos;
+//; }
+
+assign any_found_in_curr = |found_in_curr;
+
+always_comb
+begin
+    priority case (1'b1)
+//; for (my $i = $maxParserSeqLen - 1; $i >= 0; $i--) {
+        found_in_curr[`$i`] : last_found_in_curr = `$i`;
+//; }
+        default : last_found_in_curr = '0;
+    endcase
+end
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`
+

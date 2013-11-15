@@ -1,0 +1,101 @@
+////////////////////////////////////////////////////////////////
+// fifo.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   A FIFO buffer
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//  PARAMETERS:
+//; my $width  = parameter( name=>'Width', val=>32 ,
+//;                               doc=>'!FUNCTIONAL! Width of memory (bits)');
+//; my $depth  = parameter( name=>'Depth', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Depth of memory (words)' ,
+//;                               min=>1 , max=>256);
+//;
+//; my $depthBits = log2($depth);
+//; my $adjDepth = 2 ** log2($depth);
+//;
+//; print STDOUT "Generating FIFO: " . mname() . "   size: ${width}b x $adjDepth\n";
+
+// Top-level parser
+module `mname()`
+(
+    //Input Signals
+    input logic [`$width-1`:0]      wr_data,
+    input logic                     wr_en,
+
+    //Output Signals
+    output logic [`$width-1`:0]     rd_data,
+    input logic                     rd_en,
+
+    output logic                    empty,
+    output logic                    nearly_full,
+
+    //Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+logic [`$width-1`:0] mem[0:`$adjDepth-1`];
+logic [`$depthBits-1`:0] wr_pos;
+logic [`$depthBits-1`:0] rd_pos;
+logic [`$depthBits`:0] usage;
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        wr_pos <= '0;
+        rd_pos <= '0;
+        usage <= '0;
+    end
+    else begin
+        if (wr_en) begin
+            mem[wr_pos] <= wr_data;
+            wr_pos <= wr_pos + 1;
+        end
+
+        if (rd_en)
+            rd_pos <= rd_pos + 1;
+
+        if (wr_en && !rd_en)
+            usage <= usage + 1;
+        else if (rd_en && !wr_en)
+            usage <= usage - 1;
+    end
+end
+
+assign rd_data = mem[rd_pos];
+assign empty = usage == '0;
+assign nearly_full = wr_pos + 1 == rd_pos;
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+wire full = usage == `$depthBits+1`'d`$adjDepth`;
+
+// Check for memory overflow
+always @(posedge clk)
+begin
+    if (full && wr_en && !rd_en) begin
+        $display("%t: =================================================================================================", $time);
+        $display("%t: %m: ERROR: Buffer overflow: depth: %2d  wr_pos: %2d  rd_pos: %2d", $time, `$adjDepth`, wr_pos, rd_pos);
+        $display("%t: =================================================================================================", $time);
+    end
+end
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`
+

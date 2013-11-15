@@ -1,0 +1,505 @@
+////////////////////////////////////////////////////////////////
+// top.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Main parser verification module.
+//
+//   Module instantiates the parser and, if necessary, the TCAM/RAM. A
+//   number of test packets are sent to the parser and the extract field vector
+//   is veriried.
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use List::Util qw(max);
+//;
+//; my $randomPktData = parameter( name=>'RandomPktData', val=>1,
+//;                               doc=>'!FUNCTIONAL! Enable random fill of packet data',
+//;                               list=>[0, 1]);
+//; my $seqPktData = parameter( name=>'SeqPktData', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable sequential fill of packet data',
+//;                               list=>[0, 1]);
+//; $randomPktData = 0 if $seqPktData;
+//;
+//; my $maxPkts = parameter( name=>'MaxPkts', val=>100,
+//;                               doc=>'!FUNCTIONAL! Maximum number of packets to transmit',
+//;                               );
+//;
+//; # Output the random seed to allow the same packets to be generated
+//; my $seed = parameter(name=>'Seed', val=>-2,
+//;                      doc=>'!FUNCTIONAL! Value to use for the random seed');
+//; if ($seed < 0) {
+//;     $seed = POSIX::floor(rand(2 ** 31));
+//; }
+//; srand($seed);
+//; print STDOUT "Random seed: $seed\n\n";
+
+module `mname` ();
+
+const int min_pkt_len = 60;
+
+// Generate the parser and extract various useful pieces of information
+//; my $parser = generate('parser', 'parser');
+//;
+//; my $debug = $parser->get_param('Debug');
+//;
+//; my $wordByteWidth = $parser->get_param('WordWidth');
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my $progEnable = $parser->get_param('EnableProgParser');
+//; my $progBufByteWidth = $parser->get_param('ProgBufWordWidth');
+//; my $progLookupByteWidth = $parser->get_param('ProgLookupWordWidth');
+//; my $evBitWidth = $parser->get_param('ExtractVectorWidth');
+//; my $evInputs = $parser->get_param('NumExtractVectorInputs');
+//; my $progLookupWords = $parser->get_param('ProgLookupWords');
+//; my $progStateWidth = $parser->get_param('ProgStateWidth');
+//; my $numHdrIdent = $parser->get_param('NumHdrIdent');
+//; my $progMaxHdrs = $parser->get_param('ProgMaxHdrs');
+//; my $maxRdAmt = $parser->get_param('MaxRdAmt');
+//;
+//; my $evByteWidth = $evBitWidth / 8;
+//; my $hdrTypeWidth = log2($progMaxHdrs);
+//;
+//; my $progLookupBitWidth = $progLookupByteWidth * 8;
+//; my $progByteCntWidth = log2($progBufByteWidth);
+//; my $evDstWidth = log2($evBitWidth);
+//;
+//; #Get the list of header sequences (should have been set by the parser)
+//; my $hdrSeqs = getHdrSeqs();
+//;
+//; #What's the longest sequence of headers we'll see in a single cycle?
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = getExtractTables();
+//; my $destBits = log2($totalExtractBytes);
+//;
+//; #Generate the parser package
+//; my $pkg_obj = generate_base('parser_pkg', 'my_parser_pkg', WordWidth => $wordByteWidth);
+//;
+
+import parser_pkg::*;
+
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+int     clk_period;
+real    clk_period_ns;
+int     clk_half_period;
+int     extract_pkt;
+
+logic [`$wordBitWidth  - 1` : 0] pkt_data;
+logic                            pkt_data_vld;
+logic [`$wordByteWidth - 1` : 0] pkt_end;
+
+logic [0:`$maxParserSeqLen-1`]                found_hdr;
+hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type;
+logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos;
+
+logic                            pkt_done;
+
+logic               clk;
+logic               rst;
+
+//; if ($progEnable) {
+logic [7:0]                          lt_curr_state;
+logic [7:0]                          lt_nxt_state;
+logic [`$progLookupWords*$progLookupBitWidth-1`:0] lt_lookup_data;
+logic [`$progByteCntWidth+1-1`:0]                        lt_rd_amt;
+logic [`$progLookupWords-1`:0][`$progByteCntWidth-1`:0]  lt_rd_offset;
+
+logic [`$evInputs-1`:0][`$progByteCntWidth-1`:0]  lt_extract_src;
+logic [`$evInputs-1`:0][`$evDstWidth-1`:0]        lt_extract_dst;
+
+logic [`$numHdrIdent-1`:0]                        lt_found_hdr;
+logic [`$numHdrIdent-1`:0][`$hdrTypeWidth-1`:0]   lt_found_hdr_type;
+logic [`$numHdrIdent-1`:0][`$progByteCntWidth-1`:0] lt_found_hdr_pos;
+logic [`$numHdrIdent-1`:0][7:0] lt_found_hdr_size;
+//; }
+
+logic [0:`$evBitWidth-1`]        extract_vector;
+logic [0:`$evByteWidth-1`]       extract_vector_vld;
+logic                            extract_vector_rdy;
+
+
+////////////////////////////////////////
+// Module instantiation
+////////////////////////////////////////
+
+// Header identification
+`$parser->instantiate()`
+ (
+    .pkt_data       (pkt_data),
+    .pkt_data_vld   (pkt_data_vld),
+    .pkt_end        (pkt_end),
+
+    .found_hdr      (found_hdr),
+    .found_hdr_type (found_hdr_type),
+    .found_hdr_pos  (found_hdr_pos),
+    .pkt_done       (pkt_done),
+
+    .extract_vector     (extract_vector),
+    .extract_vector_vld (extract_vector_vld),
+    .extract_vector_rdy (extract_vector_rdy),
+
+//; if ($progEnable) {
+    .lt_curr_state      (lt_curr_state),
+    .lt_lookup_data     (lt_lookup_data),
+
+    .lt_nxt_state       (lt_nxt_state),
+    .lt_rd_amt          (lt_rd_amt),
+    .lt_rd_offset       (lt_rd_offset),
+
+    .lt_extract_src     (lt_extract_src),
+    .lt_extract_dst     (lt_extract_dst),
+
+    .lt_found_hdr       (lt_found_hdr),
+    .lt_found_hdr_type  (lt_found_hdr_type),
+    .lt_found_hdr_pos   (lt_found_hdr_pos),
+    .lt_found_hdr_size  (lt_found_hdr_size),
+//; }
+
+    .clk(clk),
+    .rst(rst)
+ );
+
+//; if ($progEnable) {
+//;     my $lookupTable = generate('lookup_table', 'lookup_table',
+//;                                 BufWordWidth=>$progBufByteWidth,
+//;                                 LookupWords=>$progLookupWords,
+//;                                 LookupWordWidth=>$progLookupByteWidth,
+//;                                 ExtractVectorWidth=>$evBitWidth,
+//;                                 NumExtractVectorInputs=>$evInputs,
+//;                                 NumHdrIdent=>$numHdrIdent,
+//;                                 TCAMTableFile=>getTCAMTableFile(),
+//;                                 ProgStateWidth=>$progStateWidth,
+//;                                 ProgMaxHdrs=>$progMaxHdrs,
+//;                                 MaxRdAmt=>$maxRdAmt,
+//;                                 );
+`$lookupTable->instantiate()`
+(
+    .curr_state     (lt_curr_state),
+    .lookup_data    (lt_lookup_data),
+
+    .nxt_state      (lt_nxt_state),
+    .rd_amt         (lt_rd_amt),
+    .rd_offset      (lt_rd_offset),
+
+    .ev_src         (lt_extract_src),
+    .ev_dst         (lt_extract_dst),
+
+    .found_hdr      (lt_found_hdr),
+    .found_hdr_type (lt_found_hdr_type),
+    .found_hdr_pos  (lt_found_hdr_pos),
+    .found_hdr_size (lt_found_hdr_size),
+
+    .*
+);
+//; }
+
+
+////////////////////////////////////////
+// Test data:
+//   - input packets
+//   - expected output vectors
+////////////////////////////////////////
+
+//; # Generate input packets/expected extract field vectors
+//;
+//; # Identify the number of packets to generate
+//; my $numPkts = scalar(@$hdrSeqs);
+//; my $chooseRandom = 0;
+//; if ($numPkts > $maxPkts && $maxPkts != 0) {
+// Packet count exceeds maximum. Limiting to `$maxPkts` packets. 
+//;     $numPkts = $maxPkts;
+//;     $chooseRandom = 1;
+//; }
+const int num_pkts = `$numPkts`;
+
+//; # Choose the packets to use
+//; my @pktsToUse;
+//; if (!$chooseRandom) {
+//;     @pktsToUse = (0 .. $numPkts);
+//; } else {
+//;     my @availPkts = (0 .. scalar(@$hdrSeqs) - 1);
+//;     for (my $i = 0; $i < $numPkts; $i++) {
+//;         my $choice = int(rand(scalar(@availPkts)));
+//;         push @pktsToUse, $availPkts[$choice];
+//;         delete $availPkts[$choice];
+//;     }
+//;     @pktsToUse = sort( {$a <=> $b} @pktsToUse);
+//; }
+//;
+//; # Identify the maximum packet length
+//; my $maxLen = minPktSize();
+//; my @pktLens;
+//; for (my $i = 0; $i < $numPkts; $i++) {
+//;     my $hdrSeq = $hdrSeqs->[$pktsToUse[$i]];
+//;     my $pktLen = 0;
+//;     foreach my $hdr (@$hdrSeq) {
+//;         my $lastDecByte = getLastDecByte($hdr->{'name'}) + 1;
+//;         my $hdrPktLen = $hdr->{'pos'} + max($hdr->{'len'}, $lastDecByte);
+//;         $pktLen = $hdrPktLen if $hdrPktLen > $pktLen;
+//;     }
+//;     $pktLen = minPktSize() if minPktSize() > $pktLen;
+//;
+//;     # Record pkt len / update max len
+//;     push @pktLens, $pktLen;
+//;     $maxLen = $pktLen if ($pktLen > $maxLen);
+//; }
+
+int                                             pkt_lens [0 : `$numPkts - 1`];
+logic [0:`$numPkts-1`][`$maxLen-1`:0][7:0]      pkts;
+logic [0:`$numPkts-1`][0:`$evByteWidth-1`][7:0] extract_fields;
+logic [0:`$numPkts-1`][0:`$evByteWidth-1`]      extract_fields_vld;
+
+//; for (my $i = 0; $i < $numPkts; $i++) {
+//;     my $hdrSeq = $hdrSeqs->[$pktsToUse[$i]];
+//;     my @pkt = genPktByteStream($hdrSeq, $randomPktData, $seqPktData);
+//;     my ($extFields, $extFieldsVld) = genExtractByteStream($hdrSeq, \@pkt, $evByteWidth);
+//;     my $pktLen = scalar(@pkt);
+//;
+//;     # Print the pkt
+//;     print "// Packet:";
+//;     foreach my $hdrInfo (@$hdrSeq) {
+//;         my $hdrName = $hdrInfo->{'name'};
+//;         my $hdrPos = $hdrInfo->{'pos'};
+//;         my $hdrLen = $hdrInfo->{'len'};
+//;         print " $hdrName\@$hdrPos($hdrLen)";
+//;     }
+//;     print "\n";
+//;     printVerilogArray(\@pkt, "pkts[$i]", "8'h%02x");
+
+//;     printVerilogArray($extFields, "extract_fields[$i]", "8'h%02x");
+
+//;     printVerilogArray($extFieldsVld, "extract_fields_vld[$i]", "1'b%b");
+
+
+//; }
+
+//;     printVerilogArray(\@pktLens, "pkt_lens", "%4d", 0, 1);
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+localparam MAX_PKT_LEN = `$maxLen`;
+const int MAX_WAIT_CNT = `256 / $wordByteWidth + 16`;
+
+// Clock generation
+initial begin
+    if ( $test$plusargs("clk_period") ) begin
+        $value$plusargs("clk_period=%f", clk_period_ns);
+        clk_period = $rtoi(clk_period_ns*1000.0) ;
+        clk_half_period = clk_period / 2 ;
+        $display( "Using Clk Period= %f nS", clk_period_ns) ;
+        $display( "Using Clk Period= %d pS", clk_period) ;
+    end
+    else begin
+        $display( "ERROR: No Clock Period Set, Try again") ;
+        $finish(2);
+    end
+    while(1) begin
+        #clk_half_period clk = 1'b0 ;
+        #clk_half_period clk = 1'b1 ;
+    end
+end
+
+// Reset the design on start
+initial begin
+    rst = 1'b1 ;
+    #clk_period ;
+    #clk_period ;
+    #clk_period ;
+    #clk_period ;
+    rst = 1'b0 ;
+end
+
+
+// Send a single packet
+task send_pkt (
+        input logic [MAX_PKT_LEN-1:0][7:0] pkt,
+        input integer pkt_len
+    );
+
+    int wait_cnt;
+
+    @(posedge clk);
+    pkt_data <= '0;
+    pkt_data_vld <= 0;
+    pkt_end <= 0;
+    repeat (10) @(posedge clk);
+    for (int pos = 0; pos < pkt_len || pos < min_pkt_len; pos += `$wordByteWidth`) begin
+        @(posedge clk);
+        pkt_data <= '1;
+        pkt_end <= '1;
+        for (int i = 0; i < `$wordByteWidth` && (i + pos < pkt_len || i + pos < min_pkt_len); i++) begin
+            if (pos + i < pkt_len) begin
+                pkt_data[`$wordBitWidth - 1` - i * 8 -: 8] <= pkt[pkt_len - pos - i - 1];
+                pkt_end[`$wordByteWidth - 1` - i] <= pos + i + 1 == pkt_len && pos + i + 1 >= min_pkt_len;
+            end
+            else begin
+                pkt_data[`$wordBitWidth - 1` - i * 8 -: 8] <= '0;
+                pkt_end[`$wordByteWidth - 1` - i] <= pos + i + 1 == min_pkt_len;
+            end
+            pkt_data_vld <= 1;
+        end
+    end
+
+    wait_cnt <= '0;
+    while (!pkt_done && wait_cnt < MAX_WAIT_CNT) begin
+        @(posedge clk);
+        pkt_data <= '0;
+        pkt_data_vld <= 0;
+        pkt_end <= '1;
+        wait_cnt <= wait_cnt + 1;
+    end
+
+    // Verify that the pkt_done signal was seen
+    if (!pkt_done) begin
+        $display("%t: =======================================================================================", $time);
+        $display("%t: WARNING: Suspected processing loop; pkt_done signal not asserted after %1d cycles", $time, MAX_WAIT_CNT);
+        $display("%t: =======================================================================================", $time);
+        
+        rst = 1'b1 ;
+        #clk_period ;
+        #clk_period ;
+        #clk_period ;
+        #clk_period ;
+        rst = 1'b0 ;
+    end
+endtask : send_pkt
+
+// Send the packets
+int extract_wait_cnt;
+initial begin
+    pkt_data = '0;
+    pkt_data_vld = 0;
+    pkt_end = 0;
+
+    repeat (10) @(posedge clk);#1;
+
+    $set_gate_level_monitoring("rtl_on");
+    #1
+    $set_toggle_region(top);
+    #1
+    $toggle_start();
+    #1
+    $display("%t: PACKET SEND AGENT IS ALIVE -- NOW RUN TESTS...", $time);
+    for (int i = 0; i < num_pkts; i++) begin
+        $display("%t: Sending packet %1d...", $time, i);
+        send_pkt(pkts[i], pkt_lens[i]);
+    end
+    #100;
+    $display("%t: PACKET SEND AGENT IS DONE", $time);
+
+    // Wait for extraction to complete
+    extract_wait_cnt <= '0;
+    while (extract_pkt < num_pkts && extract_wait_cnt < MAX_WAIT_CNT) begin
+        @(posedge clk);
+        extract_wait_cnt <= extract_wait_cnt + 1;
+    end
+
+    // Verify that the pkt_done signal was seen
+    if (extract_pkt != num_pkts) begin
+        $display("%t: =======================================================================================", $time);
+        $display("%t: ERROR: Extraction of all packets not completed after %1d cycles", $time, MAX_WAIT_CNT);
+        $display("%t: =======================================================================================", $time);
+    end
+
+    $toggle_stop();
+    $toggle_report ("top.saif",1.0e-12,top);
+    $finish(2);
+end
+
+
+// General intialization procedure
+initial begin
+  // if this is a "+wave" run, it must record all signals
+  if ( $test$plusargs("wave") )
+    begin
+       $display("%t: Starting Wave Capture",$time);
+       //         levels  instance
+       $vcdpluson(0,        top);
+       $vcdplusmemon(0,     top);
+    end
+end
+
+
+// Display the data going into the parser
+hdr_t fht;
+int entries;
+always @(posedge clk)
+begin
+//; if ($debug >= 2) {
+    // Display data being sent in to the parser
+    if (pkt_data_vld) begin
+        $display("%t: TOP: IN: Pkt data: %0`2*$wordByteWidth`x   EOP: %0`$wordByteWidth`b", $time, pkt_data, pkt_end);
+    end
+//; }
+
+//; if ($debug >= 1) {
+    // Display the headers that are found
+    if (found_hdr) begin
+        $write("%t: TOP: FOUND HEADER:", $time);
+        for (int i = 0; i < `$maxParserSeqLen`; i++) begin
+            if (found_hdr[i]) begin
+                // Shouldn't need to do this, but VCS pukes otherwise...
+                fht = found_hdr_type[i];
+                $write("  %1s:%1d", fht.name, found_hdr_pos[i]);
+            end
+        end
+        $write("\n");
+    end
+
+    // Display when the end of the header is detected
+    if (pkt_done) begin
+        $display("%t: TOP: PKT DONE", $time);
+    end
+//; }
+end
+
+
+// Verify the extract vector output of the parser
+initial
+begin
+    extract_pkt = 0;
+end
+
+always @(posedge clk)
+begin
+    if (extract_vector_rdy) begin
+        if (extract_vector != extract_fields[extract_pkt] ||
+            extract_vector_vld != extract_fields_vld[extract_pkt]) begin
+            $display("%t: TOP: EXTRACT: Error in extracted packet %1d", $time, extract_pkt);
+
+            // Display the extract vector
+            $write("%t: TOP: EXTRACT VECTOR:", $time);
+            entries = 0;
+            for (int i = 0; i < `$evByteWidth`; i++) begin
+                if (extract_vector_vld[i]) begin
+                    $write("  %03d:%02x", i, extract_vector[i*8+:8]);
+                end
+            end
+            $write("\n");
+            $write("%t: TOP: TARGET VECTOR: ", $time);
+            entries = 0;
+            for (int i = 0; i < `$evByteWidth`; i++) begin
+                if (extract_fields_vld[extract_pkt][i]) begin
+                    $write("  %03d:%02x", i, extract_fields[extract_pkt][i]);
+                end
+            end
+            $write("\n");
+            $finish;
+        end
+        else
+            $display("%t: TOP: EXTRACT: Extracted packet %1d good", $time, extract_pkt);
+        extract_pkt++;
+    end
+end
+
+endmodule : `mname`

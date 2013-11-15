@@ -1,0 +1,81 @@
+////////////////////////////////////////////////////////////////
+// ram_multiport.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   A configurable multi-port RAM
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser qw(log2);
+//;
+//  PARAMETERS:
+//; my $width  = parameter( name=>'Width', val=>32,
+//;                               doc=>'!FUNCTIONAL! Buffer width (bits)' ,
+//;                               min=>1 , max=>128*8);
+//; my $depth  = parameter( name=>'Depth', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Buffer depth (words)' ,
+//;                               min=>1 , max=>32);
+//; my $addrBits = log2($depth);
+//; my $wPorts  = parameter( name=>'WritePorts', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Number of write ports' ,
+//;                               min=>1 , max=>4);
+//; my $rPorts  = parameter( name=>'ReadPorts', val=>1 ,
+//;                               doc=>'!FUNCTIONAL! Number of write ports' ,
+//;                               min=>1 , max=>4);
+//; my $noSuffix = parameter( name=>'NoSuffix', val=>0 ,
+//;                               doc=>'!FUNCTIONAL! Do not include suffix on port names when singular' ,
+//;                               list=>[0, 1]);
+//;
+//; print STDOUT "Multi-port memory: ${width}b x $depth (target)   Write ports: $wPorts   Read ports: $rPorts\n";
+
+// RAM
+module `mname()`
+(
+    // Write Signals
+//; for (my $i = 0; $i < $wPorts; $i++) {
+//;     my $suffix = $wPorts == 1 && $noSuffix ? "" : "_$i";
+    input logic                             wr_en`$suffix`,
+    input logic [`$addrBits-1`:0]           wr_addr`$suffix`,
+    input logic [`$width-1`:0]              wr_data`$suffix`,
+
+//; }
+    // Read Signals
+//; for (my $i = 0; $i < $rPorts; $i++) {
+//;     my $suffix = $rPorts == 1 && $noSuffix ? "" : "_$i";
+    input logic [`$addrBits-1`:0]           rd_addr`$suffix`,
+    output logic [`$width-1`:0]             rd_data`$suffix`,
+//; }
+
+    //Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+logic [`$width-1`:0] mem [0:`$depth-1`];
+
+always_ff @(posedge clk)
+begin
+//; for (my $i = 0; $i < $wPorts; $i++) {
+//;     my $suffix = $wPorts == 1 && $noSuffix ? "" : "_$i";
+    if (wr_en`$suffix` && wr_addr`$suffix` < `$depth`)
+        mem[wr_addr`$suffix`] <= wr_data`$suffix`;
+//; }
+end
+
+always_comb
+begin
+//; for (my $i = 0; $i < $rPorts; $i++) {
+//;     my $suffix = $rPorts == 1 && $noSuffix ? "" : "_$i";
+    if (rd_addr`$suffix` < `$depth`)
+        rd_data`$suffix` = mem[rd_addr`$suffix`];
+    else
+        rd_data`$suffix` = '0;
+//; }
+end
+
+endmodule : `mname`
+
+

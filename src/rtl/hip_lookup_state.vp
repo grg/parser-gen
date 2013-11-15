@@ -1,0 +1,217 @@
+////////////////////////////////////////////////////////////////
+// prog_lookup_state.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   State machine for programmable parser: lookup function
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Width of buffered words (bytes)',
+//;                               min=>1 , max=>128);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $lookupWords = parameter( name=>'LookupWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of lookup words',
+//;                               min=>1 , max=>16);
+//; my $lookupByteWidth = parameter( name=>'LookupWordWidth', val=>2,
+//;                               doc=>'!FUNCTIONAL! Lookup word width (bytes)',
+//;                               min=>1 , max=>8, step=>1);
+//; my $lookupBitWidth = 8 * $lookupByteWidth;
+//; my $bufWords = parameter( name=>'BufWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of words to extract from the buffer',
+//;                               min=>2 , max=>8, step=>1);
+//; my $maxRdAmt = parameter( name=>'MaxRdAmt', val=>8,
+//;                               doc=>'!FUNCTIONAL! Maximum read amount (bytes)',
+//;                               min=>1 , max=>128);
+//;
+//; # Verify that the byte width is a power of two
+//; if (2 ** log2($wordByteWidth) != $wordByteWidth) {
+//;     $self->error("Word byte width must be a power of two. Specified: $wordByteWidth");
+//; }
+//;
+//; my $byteCntWidth = log2($wordByteWidth);
+//; my $rdWidth = log2($maxRdAmt);
+
+import parser_pkg::*;
+
+// Top-level parser
+module `mname()`
+(
+    // Main state machine interface
+    input logic [`$bufWords-1`:0][`$wordBitWidth-1`:0]  buf_data,
+    input logic [`$bufWords-1`:0][`$wordByteWidth-1`:0] buf_eop,
+    input logic [`$bufWords-1`:0]                       buf_vld,
+
+    input logic [HDR_WIDTH-1:0]         curr_pos,
+
+    input logic                         rd_active,
+    input logic                         pkt_will_end,
+
+    output logic [7:0]                  curr_state,
+
+    output logic                        lookup_rdy,
+    output logic                        lookup_skip_req,
+    output logic [`$rdWidth+1-1`:0]     lookup_rd_amt,
+
+    // Data to lookup engine
+    output logic [`$lookupWords*$lookupBitWidth-1`:0] lookup_data,
+    output logic                        do_lookup,
+
+    input logic [7:0]                   nxt_state,
+    input logic [`$rdWidth+1-1`:0]      rd_amt,
+    input logic [`$lookupWords-1`:0][`$byteCntWidth-1`:0] rd_offset,
+
+    // Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic [`$lookupWords-1`:0][`$byteCntWidth-1`:0] lookup_offset;
+logic [`$lookupWords-1`:0][`$byteCntWidth-1+1`:0] lookup_dst;
+logic [`$lookupWords-1`:0][`$byteCntWidth-1+1`:0] lookup_dst_end;
+logic [`$lookupWords-1`:0] lookup_data_rdy;
+logic all_lookup_data_rdy;
+
+logic [`$lookupWords-1`:0][`$lookupBitWidth-1`:0] lookup_data_int;
+
+logic skip_requested;
+
+logic [HDR_WIDTH-1:0] rd_dst;
+
+////////////////////////////////////////
+// Module instantiations
+////////////////////////////////////////
+
+// MUXes to select the lookup values from the data stream
+
+//; my @lookupDataMux;
+//; for (my $i = 0; $i < $lookupWords; $i++) {
+// Lookup MUX `$i`
+//;     push(@lookupDataMux, generate('extract_mux', "lookup_data_mux_$i",
+//;                         InputWidth => 2 * $wordBitWidth,
+//;                         OutputWidth => $lookupBitWidth,
+//;                         StartPos => 'left',
+//;                         IndexMult => 8,
+//;                         IndexBits => $byteCntWidth + 1,
+//;                         #MaxIndex => 2 * $wordByteWidth - 1,
+//;                     ));
+    `$lookupDataMux[$i]->instantiate()`
+    (
+        //Input Signals
+        .in_data ({buf_data[0], buf_data[1]}),
+        .index_amt (lookup_dst[`$i`]),
+
+        //Output Signals
+        .out_data (lookup_data_int[`$i`])
+    );
+
+//; }
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+// Calculate the lookup locations and lookup ready
+//; my $allLookupRdyStr = '';
+//; for (my $i = 0; $i < $lookupWords; $i++) {
+//;     $allLookupRdyStr .= " && " if ($i != 0);
+//;     $allLookupRdyStr .= "lookup_data_rdy[$i]";
+assign lookup_dst[`$i`] = curr_pos[`$byteCntWidth-1`:0] + lookup_offset[`$i`];
+assign lookup_dst_end[`$i`] = lookup_dst[`$i`] + `fmtVal($lookupByteWidth - 1, $byteCntWidth + 1)`;
+assign lookup_data_rdy[`$i`] =
+        lookup_dst_end[`$i`][`$byteCntWidth`] == 0 && buf_vld[0] ||
+        lookup_dst_end[`$i`][`$byteCntWidth`] == 1 && buf_vld[1];
+
+//; }
+assign all_lookup_data_rdy = `$allLookupRdyStr`;
+
+assign do_lookup = all_lookup_data_rdy;
+assign lookup_rdy = all_lookup_data_rdy;
+assign lookup_rd_amt = rd_amt;
+assign lookup_skip_req = curr_state == 255 && !skip_requested;
+
+// Next position when reading lookup_rd_amt bytes
+assign rd_dst = curr_pos + lookup_rd_amt;
+
+// Copy the lookup data
+//; print "assign lookup_data = {";
+//; for (my $i = 0; $i < $lookupWords; $i++) {
+//; print ", " if $i > 0;
+//; print "lookup_data_int[$i]";
+//; }
+//; print "};\n";
+
+// Primary state machine
+always_ff @(posedge clk or posedge rst)
+begin
+//; my $firstLookupWords = getProgFirstLookupWordsNew();
+    if (rst) begin
+        curr_state <= '0;
+//; for (my $i = 0; $i < $lookupWords; $i++) {
+        lookup_offset[`$i`] <= `fmtVal($firstLookupWords->[$i], $byteCntWidth)`;
+//; }
+
+        skip_requested <= '0;
+    end
+    else begin
+        if (pkt_will_end) begin
+            curr_state <= '0;
+//; for (my $i = 0; $i < $lookupWords; $i++) {
+            lookup_offset[`$i`] <= `fmtVal($firstLookupWords->[$i], $byteCntWidth)`;
+//; }
+
+            skip_requested <= '0;
+        end
+        else begin
+            if (all_lookup_data_rdy && rd_active) begin
+                curr_state <= nxt_state;
+//; for (my $i = 0; $i < $lookupWords; $i++) {
+                lookup_offset[`$i`] <= rd_offset[`$i`];
+//; }
+            end
+            skip_requested <= skip_requested || lookup_skip_req;
+        end
+    end
+end
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+//; if ($debug >= 1) {
+integer i;
+
+always @(posedge clk)
+begin
+    if (buf_vld[0] && all_lookup_data_rdy) begin
+        $write("%t: Lookup data:", $time);
+        for (i = 0; i < `$lookupWords`; i++) begin
+            $write(" %0`$lookupByteWidth * 2`x", lookup_data_int[i]);
+        end
+        $write("\n");
+    end
+end
+//; }
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

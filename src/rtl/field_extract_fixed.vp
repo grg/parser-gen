@@ -1,0 +1,325 @@
+////////////////////////////////////////////////////////////////
+// field_extract_field.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Field extraction module for a fixed parser
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use ParserJSONImport;
+//; use List::Util;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = calcExtractTables();
+//; my ($parsers, $parserSeqs, $wideParsers, $maxLag, $maxLagSeq) = getParserLocs();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my $bufLen = POSIX::ceil($maxLag / $wordByteWidth);
+//;
+//; my $destBits = log2($totalExtractBytes);
+//; my $tableDepthBits = log2($totalExtractEntries);
+//; my $tableDepth = 2 ** log2($totalExtractEntries);
+//;
+//; my $numHeaders = numHeaders();
+//;
+//; my $offsetBits = log2($wordByteWidth);
+//; my $extEntryWidthBits = log2($wordByteWidth + 1);
+//;
+//; my $diagMsg = '';
+//; $diagMsg .= "Extract map:\n";
+//; foreach my $hdrName (sort(keys(%$extractMap))) {
+//; 	$diagMsg .= "  $hdrName:";
+//; 	foreach my $targetList (@{$extractMap->{$hdrName}}) {
+//; 		$diagMsg .= " [";
+//; 		my $inPos = 0;
+//; 		foreach my $targetPos (@$targetList) {
+//; 			$diagMsg .= ", " if $inPos++ > 0;
+//; 			$diagMsg .= "$targetPos";
+//; 		}
+//; 		$diagMsg .= "]";
+//; 	}
+//; 	$diagMsg .= "\n";
+//; }
+//; $diagMsg .= "Total extract bytes: $totalExtractBytes\n\n";
+//; print STDOUT $diagMsg;
+//;
+//; # FIXME: This should probably be a function
+//; my $totalHeaders = $numHeaders + 1;
+//; my $hdrCntWidth = POSIX::ceil(log($totalHeaders) / log(2));
+
+
+
+//;
+//; my $shiftWidth = getShiftWidth();
+//; my $foundCntWidth = log2($maxParserSeqLen + 1);
+
+
+import parser_pkg::*;
+
+// FIXME: make async reset
+
+module `mname()`
+(
+    // Packet data input
+    input logic [ `$wordBitWidth-1` : 0]    pkt_data,
+    input logic                             pkt_data_vld,
+    input logic [ `$wordByteWidth-1` : 0]   pkt_end,
+
+    // Found header input
+    input logic [0:`$maxParserSeqLen-1`]                found_hdr,
+    input hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type,
+    input logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos,
+
+    input logic [HDR_WIDTH-1:0]             decode_proc_pos,
+
+    input logic                                         pkt_done,
+
+    // Output
+    output logic [ `$wordBitWidth-1` : 0]   pkt_data_out,
+    output logic                            pkt_data_vld_out,
+    output logic [ `$wordByteWidth-1` : 0]  pkt_end_out,
+
+    output logic [0:`$wordByteWidth-1`][`$destBits-1`:0] extract_target,
+
+    output logic                                        fe_pkt_done,
+
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+const logic [`$tableDepthBits-1`:0] HDR_DONE = 0;
+
+// Buffer signals
+logic [`$wordBitWidth-1` : 0]   rd_data;
+logic                           rd_data_eop;
+logic                           pkt_buf_rd_en;
+
+// State tracking signals
+logic [-1:`$maxParserSeqLen-1`][`$offsetBits-1`:0] offset;
+
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0] target_rem_left;
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0] target_rem_right;
+
+// Extract ROM signals
+logic[-1:`$maxParserSeqLen-1`][`$tableDepthBits-1`:0] extract_rd_addr;
+
+logic[-1:`$maxParserSeqLen-1`][0:`$wordByteWidth-1`][`$destBits-1`:0] extract_target_raw;
+logic[-1:`$maxParserSeqLen-1`][0:`$wordByteWidth-1`][`$destBits-1`:0] extract_target_muxed;
+logic[-1:`$maxParserSeqLen-1`][0:`2*$wordByteWidth-1`][`$destBits-1`:0] shifted_extract_target;
+logic[-1:`$maxParserSeqLen-1`][`$extEntryWidthBits-1`:0] extract_entry_width;
+
+logic[-1:`$maxParserSeqLen-1`][`$tableDepthBits-1`:0] extract_nxt_addr;
+
+
+// Header offset
+logic [0:`$maxParserSeqLen-1`][`$destBits-1`:0] extract_offset;
+
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0] extract_offset_rem_left;
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0] extract_offset_rem_right;
+
+logic [0:`$wordByteWidth-1`][`$destBits-1`:0] extract_offset_left, extract_offset_right;
+
+logic pkt_buf_empty;
+logic [`$wordBitWidth-1` : 0]   pkt_buf_eop;
+
+logic [0:`$maxParserSeqLen-1`]                found_hdr_buf_vld;
+hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_buf_type;
+logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_buf_pos;
+
+logic                           found_hdr_buf_rd_en;
+logic [`$hdrCntWidth-1`:0]      found_hdr_buf_rd_amt;
+
+logic [HDR_WIDTH-1:0]           curr_pos;
+logic [`$offsetBits-1` : 0]     curr_offset;
+//logic                           fe_pkt_done;
+
+logic [0:`$maxParserSeqLen-1`]  found_in_curr;
+logic                           any_found_in_curr;
+logic [`$foundCntWidth-1`:0]    last_found_in_curr;
+
+logic [`$tableDepthBits-1`:0]   curr_extract_rd_addr;
+
+////////////////////////////////////////
+// Instantiations
+////////////////////////////////////////
+
+//; my $hdrCntr = generate('extract_hdr_cnt', 'extract_hdr_cnt', 
+//;                         WordWidth => $wordByteWidth,
+//;                         Debug => $debug,);
+    `$hdrCntr->instantiate()`
+    (
+        .eop (rd_data_eop),
+        .*
+    );
+
+//; my $buf = generate('fifo', 'pkt_buf', Width => $wordBitWidth + 1, Depth => $bufLen + 2);
+    `$buf->instantiate()`
+    (
+        //Input Signals
+        .wr_data    ({|pkt_end, pkt_data}),
+        .wr_en      (pkt_data_vld),
+
+        //Output Signals
+        .rd_data    ({rd_data_eop, rd_data}),
+        .rd_en      (pkt_buf_rd_en),
+
+        .empty      (pkt_buf_empty),
+        .nearly_full (),
+
+        //Global Signals
+        .clk        (clk),
+        .rst        (rst)
+    );
+
+//; my $extractRom = generate('extract_rom', 'extract_rom', WordWidth => $wordByteWidth);
+    `$extractRom->instantiate()`
+    (
+        //Input Signals
+        .rd_addr (extract_rd_addr),
+
+        //Output Signals
+        .extract_target (extract_target_raw),
+        .nxt_addr (extract_nxt_addr),
+        .entry_width (extract_entry_width),
+
+
+        //Global Signals
+        .clk (clk),
+        .rst (clk)
+    );
+
+//; my $foundHdrBuf = generate('fe_found_hdr_buf', 'fe_found_hdr_buf');
+    `$foundHdrBuf->instantiate()`
+    (
+        // Found header input
+        .found_hdr_in (found_hdr),
+        .found_hdr_type_in (found_hdr_type),
+        .found_hdr_pos_in (found_hdr_pos),
+
+        .found_hdr_out (found_hdr_buf_vld),
+        .found_hdr_type_out (found_hdr_buf_type),
+        .found_hdr_pos_out (found_hdr_buf_pos),
+
+        .rd (found_hdr_buf_rd_en),
+        .rd_amt (found_hdr_buf_rd_amt),
+
+        .clk (clk),
+        .rst (rst)
+    );
+
+// Buffer state machine
+//; my $bufState = generate('fef_buf_state', 'fef_buf_state', WordWidth => $wordByteWidth,);
+    `$bufState->instantiate()`
+    (
+        // Packet buffer interface
+        .pkt_buf_rd_en (pkt_buf_rd_en),
+        .pkt_buf_empty (pkt_buf_empty),
+        .pkt_buf_eop (pkt_buf_eop),
+
+        // Found header buffer interface
+        .found_hdr_buf_vld (found_hdr_buf_vld),
+        .found_hdr_buf_type (found_hdr_buf_type),
+        .found_hdr_buf_pos (found_hdr_buf_pos),
+
+        .found_hdr_buf_rd_en (found_hdr_buf_rd_en),
+        .found_hdr_buf_rd_amt (found_hdr_buf_rd_amt),
+
+        // Extract ROM interface
+        .extract_nxt_addr (extract_nxt_addr),
+        .extract_rd_addr (extract_rd_addr),
+        .extract_entry_width (extract_entry_width),
+
+        // Output
+        .curr_pos (curr_pos),
+        .curr_offset (curr_offset),
+        .curr_rd_addr (curr_extract_rd_addr),
+        .pkt_done (fe_pkt_done),
+
+        .found_in_curr (found_in_curr),
+        .any_found_in_curr (any_found_in_curr),
+        .last_found_in_curr (last_found_in_curr),
+
+        //Global Signals
+        .clk (clk),
+        .rst (rst)
+    );
+
+// Extract target merge/generation logic
+//; my $extTargGen = generate('fef_extract_target', 'fef_extract_target',
+//;                             WordWidth => $wordByteWidth,
+//;                             Debug => $debug,);
+    `$extTargGen->instantiate()`
+    (
+        // Packet buffer interface
+        .pkt_buf_empty (pkt_buf_empty),
+        .pkt_buf_rd_en (pkt_buf_rd_en),
+
+        // Buffer state machine interface
+        .curr_pos (curr_pos),
+        .curr_offset (curr_offset),
+        .pkt_done (fe_pkt_done),
+
+        .found_in_curr (found_in_curr),
+        .any_found_in_curr (any_found_in_curr),
+        .last_found_in_curr (last_found_in_curr),
+
+        // Found header buffer interface
+        .found_hdr_buf_vld (found_hdr_buf_vld),
+        .found_hdr_buf_type (found_hdr_buf_type),
+        .found_hdr_buf_pos (found_hdr_buf_pos),
+
+        // Extract ROM interface
+        .extract_target_in (extract_target_raw),
+        .curr_extract_rd_addr (curr_extract_rd_addr),
+
+        // Output
+        .extract_target_out (extract_target),
+
+        //Global Signals
+        .clk (clk),
+        .rst (rst)
+    );
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+// Output logic
+always_ff @(posedge clk)
+begin
+    pkt_data_out <= rd_data;
+    pkt_data_vld_out <= pkt_buf_rd_en;
+    pkt_end_out <= rd_data_eop;
+end
+
+assign pkt_buf_eop = rd_data_eop;
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

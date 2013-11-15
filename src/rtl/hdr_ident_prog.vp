@@ -1,0 +1,236 @@
+////////////////////////////////////////////////////////////////
+// hdr_ident_prog.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Header identification module for a programmable parser
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//; my $bufWords = parameter( name=>'BufWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of words to extract from the buffer',
+//;                               min=>2 , max=>8, step=>1);
+//; my $progBufByteWidth = parameter( name=>'ProgBufWordWidth', val=>16,
+//;                               doc=>'!FUNCTIONAL! Width of programmable buffer (bytes)',
+//;                               min=>1 , max=>128, step=>1);
+//; my $progBufBitWidth = $progBufByteWidth * 8;
+//; my $progBufDepth = parameter( name=>'ProgBufDepth', val=>2,
+//;                               doc=>'!FUNCTIONAL! Depth of programmable buffer (words)',
+//;                               min=>1 , max=>16, step=>1);
+//;
+//; my $progLookupByteWidth = parameter( name=>'ProgLookupWordWidth', val=>2,
+//;                               doc=>'!FUNCTIONAL! Width of programmable lookup word (bytes)',
+//;                               min=>1 , max=>16, step=>1);
+//; my $progLookupBitWidth = $progLookupByteWidth * 8;
+//; my $progLookupWords = parameter( name=>'ProgLookupWords', val=>2,
+//;                               doc=>'!FUNCTIONAL! Number of lookup words in programmable parser',
+//;                               min=>1 , max=>16, step=>1);
+//; my $progStateWidth = parameter( name=>'ProgStateWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Width of state variable (bits)',
+//;                               min=>1 , max=>16);
+//; my $progDestOffset = parameter( name=>'ProgDestOffset', val=>1,
+//;                               doc=>'!FUNCTIONAL! Include destination offset calculation logic',
+//;                               list=>[0, 1]);
+//;
+//; my $evBitWidth = parameter(name=>'ExtractVectorWidth', val=>"4096",
+//;                           doc=>'!FUNCTIONAL! Extract field vector width (bits)');
+//; my $evByteWidth = $evBitWidth / 8;
+//;
+//;
+//; # Verify the sanity of inputs
+//; if ($evBitWidth % 8 != 0) {
+//;     $self->error("Extract field vector width must be a multiple of 8 bits. Specified: $evBitWidth")
+//; }
+//; my $evInputs = parameter(name=>'NumExtractVectorInputs', val=>"12",
+//;                           doc=>'!FUNCTIONAL! Number of single-byte inputs to the extract field vector');
+//; my $numHdrIdent = parameter(name=>'NumHdrIdent', val=>"3",
+//;                           doc=>'!FUNCTIONAL! Number of headers identified in a single cycle');
+//;
+//;
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my ($totalExtractBytes, $totalExtractEntries, $extractMap, $extractOffset) = getExtractTables();
+//; my $destBits = log2($totalExtractBytes);
+//;
+//; my $progByteCntWidth = log2($progBufByteWidth);
+//; my $evDstWidth = log2($evBitWidth);
+//; my $progMaxHdrs = parameter( name=>'ProgMaxHdrs', val=>32,
+//;                               doc=>'!FUNCTIONAL! Maximum number of headers',
+//;                               min=>1 , max=>128, step=>1);
+//; my $maxRdAmt = parameter( name=>'MaxRdAmt', val=>8,
+//;                               doc=>'!FUNCTIONAL! Maximum read amount (bytes)',
+//;                               min=>1 , max=>128);
+//;
+//; my $hdrTypeWidth = log2($progMaxHdrs);
+//; my $rdWidth = log2($maxRdAmt);
+
+import parser_pkg::*;
+
+module `mname()`
+(
+    //Input Signals
+    input logic [ `$wordBitWidth-1` : 0]    pkt_data,
+    input logic                             pkt_data_vld,
+    input logic [ `$wordByteWidth-1` : 0]   pkt_end,
+
+    output logic                            hi_pkt_done,
+
+    output logic [HDR_WIDTH-1:0]            curr_pos,
+
+    output logic                            rd_active,
+    output logic                            do_lookup,
+
+    output logic [`$bufWords-1`:0][`$progBufBitWidth-1`:0]  buf_data,
+    output logic [`$bufWords-1`:0][`$progBufByteWidth-1`:0] buf_eop,
+    output logic [`$bufWords-1`:0]                          buf_vld,
+
+    // Lookup table interface
+    output logic [7:0]                                          lt_curr_state,
+    output logic [`$progLookupWords*$progLookupBitWidth-1`:0]   lt_lookup_data,
+
+    input logic [7:0]                                               lt_nxt_state,
+    input logic [`$rdWidth+1-1`:0]                                  lt_rd_amt,
+    input logic [`$progLookupWords-1`:0][`$progByteCntWidth-1`:0]   lt_rd_offset,
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic                       hdr_buf_empty;
+logic                       hdr_buf_rd_en;
+logic [`$progBufBitWidth-1`:0]  hdr_buf_rd_data;
+logic [`$progBufByteWidth-1`:0] hdr_buf_rd_eop;
+
+logic pkt_will_end;
+
+// Lookup-specific interface
+logic                       lookup_rdy;
+logic                       lookup_skip_req;
+logic [`$rdWidth+1-1`:0]    lookup_rd_amt;
+
+////////////////////////////////////////
+// Module instantiaion
+////////////////////////////////////////
+
+//; my $hdrBuffer = generate('hdr_buffer', 'hdr_buffer_data',
+//;                             WordWidth=>8,
+//;                             InputWidth=>$wordByteWidth,
+//;                             OutputWidth=>$progBufByteWidth,
+//;                             Depth=>4,
+//;                             );
+`$hdrBuffer->instantiate()`
+(
+    .wr_en          (pkt_data_vld),
+    .wr_data        (pkt_data),
+
+    .flush_buf      (),
+    .force_write    (|pkt_end),
+
+    .rd_en          (hdr_buf_rd_en),
+    .rd_data        (hdr_buf_rd_data),
+
+    .empty          (hdr_buf_empty),
+    .nearly_full    (),
+    .full           (),
+
+    .clk            (clk),
+    .rst            (rst)
+);
+
+//; my $hdrBuffer = generate('hdr_buffer', 'hdr_buffer_eop',
+//;                             WordWidth=>1,
+//;                             InputWidth=>$wordByteWidth,
+//;                             OutputWidth=>$progBufByteWidth,
+//;                             Depth=>4,
+//;                             );
+`$hdrBuffer->instantiate()`
+(
+    .wr_en          (pkt_data_vld),
+    .wr_data        (pkt_end),
+
+    .flush_buf      (),
+    .force_write    (|pkt_end),
+
+    .rd_en          (hdr_buf_rd_en),
+    .rd_data        (hdr_buf_rd_eop),
+
+    .empty          (),
+    .nearly_full    (),
+    .full           (),
+
+    .clk            (clk),
+    .rst            (rst)
+);
+
+//; my $progBufState = generate('hip_buf_state', 'hip_buf_state',
+//;                             WordWidth=>$progBufByteWidth,
+//;                             BufWords=>$bufWords,
+//;                             MaxRdAmt => $maxRdAmt,
+//;                             Debug => $debug,
+//;                             );
+`$progBufState->instantiate()`
+(
+    // Read Signals
+    .buf_empty(hdr_buf_empty),
+
+    .buf_rd_en(hdr_buf_rd_en),
+    .buf_rd_data(hdr_buf_rd_data),
+    .buf_rd_eop(hdr_buf_rd_eop),
+
+    .*
+);
+
+//; my $progLookupState = generate('hip_lookup_state', 'hip_lookup_state',
+//;                             WordWidth=>$progBufByteWidth,
+//;                             BufWords=>$bufWords,
+//;                             LookupWords=>$progLookupWords,
+//;                             LookupWordWidth=>$progLookupByteWidth,
+//;                             MaxRdAmt => $maxRdAmt,
+//;                             );
+`$progLookupState->instantiate()`
+(
+    .curr_state (lt_curr_state),
+    .lookup_data (lt_lookup_data),
+
+    .nxt_state (lt_nxt_state),
+    .rd_amt (lt_rd_amt),
+    .rd_offset (lt_rd_offset),
+
+    .*
+);
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+assign hi_pkt_done = pkt_will_end;
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

@@ -1,0 +1,328 @@
+////////////////////////////////////////////////////////////////
+// hif_state.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Main state machine for fixed header identification module
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use List::Util;
+//;
+//; # PARAMETERS:
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $useDblWide = parameter( name=>'UseDblWide', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable processing of double-width words',
+//;                               list=>[0, 1]);
+//;
+//;
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $widthMult = $useDblWide ? 2 : 1;
+//;
+//; # Calculate the locations/sequences of parsers
+//; # (need to do this now to identify the maximum parsers in a single cycle)
+//; my ($parsers, $parserSeqs, $wideParsers, $maxLag, $maxLagSeq) = getParserLocs();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my $bufLen = POSIX::ceil($maxLag / $wordByteWidth);
+//;
+//; my $numIfcSW = getIfcArrayLen();
+//; my $numIfcDW = getIfcArrayLenDW();
+//;
+//; my $shiftWidth = getShiftWidth();
+
+
+import parser_pkg::*;
+
+// Module to decode header types and lengths
+module `mname()`
+(
+    ////////////////////////////////////////
+    // Local variables
+    ////////////////////////////////////////
+    
+    // Top-level signals
+    input logic                             pkt_data_vld,
+    input logic [ `$wordByteWidth-1` : 0]   pkt_end,
+
+    output logic                            pkt_done,
+
+
+    // Hdr decode state internal signals
+    input logic [ 0:`$widthMult * $wordByteWidth - 1`]  shifted_end,
+
+    input logic                     merged_nxt_hdr_info_vld,
+    input hdr_t                     merged_curr_hdr_type_nxt,
+    input logic [ HDR_WIDTH-1:0]    merged_nxt_hdr_len,
+    input logic [ HDR_WIDTH-1:0]    merged_curr_hdr_start_nxt,
+    input logic [ HDR_WIDTH-1:0]    merged_curr_hdr_len_nxt,
+
+    input logic                     merged_curr_hdr_info_vld,
+    input logic [ HDR_WIDTH-1:0]    merged_curr_hdr_len,
+
+    input logic                     merged_curr_hdr_last_word,
+
+    input logic [offsetWidth - 1 : 0] merged_offset_nxt,
+    input logic [BR_WIDTH-1:0]        merged_buf_rd_amt,
+    input logic [`$shiftWidth-1` : 0] merged_shift_amt_nxt,
+
+    input logic [0:`$maxParserSeqLen-1`]                merged_found_hdr_nxt,
+    input hdr_t [0:`$maxParserSeqLen-1`]                merged_found_hdr_type_nxt,
+    input logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] merged_found_hdr_pos_nxt,
+
+
+    output logic [HDR_WIDTH-1:0]        pkt_pos, pkt_pos_nxt,
+    output logic [HDR_WIDTH-1:0]        hdr_pos,
+
+    output hdr_t                        curr_hdr_type,
+    output logic [HDR_WIDTH-1:0]        curr_hdr_len,
+    output logic [HDR_WIDTH-1:0]        curr_hdr_start,
+    output logic [HDR_WIDTH-1:0]        curr_proc_pos,
+    output logic [offsetWidth - 1 : 0]  offset,
+    
+    output logic [0:`$maxParserSeqLen-1`]                found_hdr,
+    output hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type,
+    output logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos,
+
+    output hdr_t                        nxt_hdr_type,
+    output logic [HDR_WIDTH-1:0]        nxt_hdr_len,
+    output logic [offsetWidth - 1 : 0]  nxt_hdr_offset,
+
+    output logic                        in_pkt,
+    output logic                        shifted_vld,
+
+    output logic                        pkt_done_nxt,
+    output logic [`$shiftWidth-1` : 0]  shift_amt,
+    output logic [BR_WIDTH-1 : 0]       buf_rd_amt,
+    
+    //Global Signals
+    input logic           clk,                 // Clock
+    input logic           rst                  // Reset
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+logic [HDR_WIDTH-1:0] hdr_pos_nxt;
+hdr_t curr_hdr_type_nxt;
+logic [HDR_WIDTH-1:0] curr_hdr_len_nxt;
+logic [HDR_WIDTH-1:0] curr_hdr_start_nxt;
+logic [HDR_WIDTH-1:0] curr_proc_pos_nxt;
+logic [offsetWidth - 1 : 0] offset_nxt;
+logic [`$shiftWidth-1` : 0] shift_amt_nxt;
+logic [HDR_WIDTH-1:0] end_pos;
+
+logic [0:`$maxParserSeqLen-1`]                found_hdr_nxt;
+hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type_nxt;
+logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos_nxt;
+
+
+hdr_t                           nxt_hdr_type_nxt;
+logic [HDR_WIDTH-1:0]           nxt_hdr_len_nxt;
+logic [offsetWidth - 1 : 0]     nxt_hdr_offset_nxt;
+
+logic                           last_word;
+logic                           seen_end;
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        pkt_pos <= 0;
+        hdr_pos <= 0;
+        curr_proc_pos <= 0;
+        curr_hdr_start <= 0;
+        curr_hdr_type <= FIRST_HDR;
+        curr_hdr_len <= '0;
+        offset <= 0;
+        nxt_hdr_offset <= `($wordByteWidth - 14) % $wordByteWidth`;
+        shift_amt <= 0;
+
+        nxt_hdr_type <= UNKNOWN;
+        nxt_hdr_len <= 0;
+
+        pkt_done <= 0;
+        pkt_done_nxt <= 0;
+
+        for (int i = 0; i < `$maxParserSeqLen`; i++) begin
+            found_hdr[i] <= 0;
+            found_hdr_type[i] <= FIRST_HDR;
+            found_hdr_pos[i] <= 0;
+        end
+    end
+    else begin
+        pkt_pos <= pkt_pos_nxt;
+        hdr_pos <= hdr_pos_nxt;
+        curr_proc_pos <= curr_proc_pos_nxt;
+        curr_hdr_start <= curr_hdr_start_nxt;
+        curr_hdr_type <= curr_hdr_type_nxt;
+        curr_hdr_len <= curr_hdr_len_nxt;
+        shift_amt <= shift_amt_nxt;
+        offset <= offset_nxt;
+        nxt_hdr_offset <= nxt_hdr_offset_nxt;
+
+        nxt_hdr_type <= nxt_hdr_type_nxt;
+        nxt_hdr_len <= nxt_hdr_len_nxt;
+
+        pkt_done <= pkt_done_nxt;
+        pkt_done_nxt <= last_word;
+
+        found_hdr_type <= found_hdr_type_nxt;
+        found_hdr_pos <= found_hdr_pos_nxt;
+        found_hdr <= found_hdr_nxt;
+    end
+end
+
+assign shifted_vld = pkt_data_vld || (in_pkt && seen_end);
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        in_pkt <= 0;
+    end
+    else begin
+        if (last_word)
+            in_pkt <= 0;
+        else if (pkt_data_vld)
+            in_pkt <= 1;
+    end
+end
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        seen_end <= 0;
+        end_pos <= '1;
+    end
+    else begin
+        if (pkt_data_vld && |pkt_end) begin
+            seen_end <= 1;
+            end_pos <= pkt_pos;
+        end
+        else if (pkt_data_vld) begin
+            seen_end <= 0;
+            end_pos <= '1;
+        end
+    end
+end
+
+assign last_word = in_pkt & seen_end & (curr_hdr_type == UNKNOWN | (merged_curr_hdr_last_word & merged_curr_hdr_type_nxt == UNKNOWN));
+
+always_comb
+begin
+    // Default to previous values
+    pkt_pos_nxt = pkt_pos;
+    hdr_pos_nxt = hdr_pos;
+    curr_proc_pos_nxt = curr_proc_pos;
+    curr_hdr_start_nxt = curr_hdr_start;
+    curr_hdr_type_nxt = curr_hdr_type;
+    curr_hdr_len_nxt = curr_hdr_len;
+    offset_nxt = offset;
+    nxt_hdr_offset_nxt = nxt_hdr_offset;
+    found_hdr_nxt = '0;
+    found_hdr_type_nxt = found_hdr_type;
+    found_hdr_pos_nxt = found_hdr_pos;
+
+    nxt_hdr_type_nxt = nxt_hdr_type;
+    nxt_hdr_len_nxt = nxt_hdr_len;
+
+    shift_amt_nxt = shift_amt;
+    buf_rd_amt = 1;
+
+    if (pkt_done_nxt)
+    begin
+        found_hdr_nxt = {1'b0`", 1'b0" x ($maxParserSeqLen - 1)`};
+        found_hdr_type_nxt = {FIRST_HDR`", UNKNOWN" x ($maxParserSeqLen - 1)`};
+        found_hdr_pos_nxt = 0;
+        pkt_pos_nxt = 0;
+        hdr_pos_nxt = 0;
+        curr_proc_pos_nxt = 0;
+        curr_hdr_start_nxt = 0;
+        curr_hdr_type_nxt = FIRST_HDR;
+        curr_hdr_len_nxt = '0;
+        offset_nxt = 0;
+        nxt_hdr_offset_nxt = `($wordByteWidth - 14) % $wordByteWidth`;
+
+        nxt_hdr_type_nxt = UNKNOWN;
+
+        shift_amt_nxt = '0;
+    end
+    else if (shifted_vld)
+    begin
+        pkt_pos_nxt += `$wordByteWidth`;
+        if (pkt_pos >= curr_hdr_start) begin
+            hdr_pos_nxt += `$wordByteWidth`;
+            curr_proc_pos_nxt += `$wordByteWidth`;
+
+            if (merged_nxt_hdr_info_vld) begin
+                nxt_hdr_type_nxt = merged_curr_hdr_type_nxt;
+                nxt_hdr_len_nxt = merged_nxt_hdr_len;
+            end
+
+//; if ($useDblWide) {
+            if (offset >= `$wordByteWidth`) begin
+                offset_nxt = offset - `$wordByteWidth`;
+                hdr_pos_nxt += `$wordByteWidth`;
+            end
+//; }
+
+//; if ($useDblWide) {
+            if (shift_amt >= `$wordByteWidth`) begin
+                shift_amt_nxt = shift_amt - `$wordByteWidth`;
+            end
+//; }
+
+            if (curr_proc_pos == '0) begin
+//; if ($maxParserSeqLen > 1) {
+                found_hdr_nxt = {1'b1, merged_found_hdr_nxt[0:`$maxParserSeqLen-2`]};
+                found_hdr_type_nxt = {FIRST_HDR, merged_found_hdr_type_nxt[0:`$maxParserSeqLen-2`]};
+                found_hdr_pos_nxt = {`fmtWidthVal(0)`, merged_found_hdr_pos_nxt[0:`$maxParserSeqLen-2`]};
+//; } else {
+                found_hdr_nxt = 1'b1;
+                found_hdr_type_nxt = FIRST_HDR;
+                found_hdr_pos_nxt = '0;
+//; }
+            end
+            //else if (merged_curr_hdr_last_word || !in_pkt) begin
+            else if (merged_nxt_hdr_info_vld || !in_pkt) begin
+                found_hdr_nxt = merged_found_hdr_nxt;
+                found_hdr_type_nxt = merged_found_hdr_type_nxt;
+                found_hdr_pos_nxt = merged_found_hdr_pos_nxt;
+            end
+
+            if (merged_curr_hdr_last_word) begin
+                hdr_pos_nxt = 0;
+                curr_proc_pos_nxt = merged_curr_hdr_start_nxt;
+                curr_hdr_type_nxt = merged_curr_hdr_type_nxt;
+                curr_hdr_start_nxt = merged_curr_hdr_start_nxt;
+                curr_hdr_len_nxt = merged_curr_hdr_len_nxt;
+                offset_nxt = merged_offset_nxt;
+                shift_amt_nxt = merged_shift_amt_nxt;
+                buf_rd_amt = merged_buf_rd_amt;
+            end
+            else if (merged_curr_hdr_info_vld) begin
+                nxt_hdr_offset_nxt = merged_offset_nxt;
+                curr_hdr_len_nxt = merged_curr_hdr_len;
+            end
+        end
+        else begin
+            offset_nxt += `$wordByteWidth`;
+//; if ($useDblWide) {
+            if (shift_amt >= `$wordByteWidth`) begin
+                shift_amt_nxt = shift_amt - `$wordByteWidth`;
+            end
+//; }
+        end
+    end
+end
+
+endmodule : `mname`

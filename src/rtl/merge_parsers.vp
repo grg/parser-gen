@@ -1,0 +1,607 @@
+////////////////////////////////////////////////////////////////
+// merge_parser.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Merge the output of the various parsers
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # PARAMETERS:
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $useDblWide = parameter( name=>'UseDblWide', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable processing of double-width words',
+//;                               list=>[0, 1]);
+//; my $numIfcSW = getIfcArrayLen();
+//; my $numIfcDW = getIfcArrayLenDW();
+//; my ($parsers, $parserSeqs, $wideParsers, $maxLag, $maxLagSeq) = getParserLocs();
+//; my $mpsl = maxParserSeqLen();
+//; my $ifc = $self->get_parent()->get_param('IfcPtr');
+//; my $ifcDblWide;
+//; if ($self->get_parent()->exists_param('IfcDblWidePtr')) {
+//;     $ifcDblWide = $self->get_parent()->get_param('IfcDblWidePtr');
+//; }
+//;
+//; my $numOffsets = $wordByteWidth * ($useDblWide ? 2 : 1);
+//; my $numOffsetBits = log2($numOffsets);
+//; my @sortedOffsets = sort(cmpNum keys(%$parsers));
+//; my $foundDestBits = log2($mpsl + 1);
+//; my $shiftWidth = getShiftWidth();
+
+
+import parser_pkg::*;
+
+
+// Merge the outputs of the various sub-parsers
+module `mname()`
+(
+    // Parser interfaces
+    //; if ($numIfcSW > 0) {
+    `$ifc->mname()`.observer parser_ifcs[`$numIfcSW-1`:0],
+    //; }
+    //; if ($numIfcDW > 0) {
+    `$ifcDblWide->mname()`.observer parser_ifcs_wide[`$numIfcDW-1`:0],
+    //; }
+
+    input [HDR_WIDTH-1:0]               pkt_pos,
+    input [HDR_WIDTH-1:0]               hdr_pos,
+    input [HDR_WIDTH-1:0]               curr_proc_pos,
+    input hdr_t                         curr_hdr_type,
+    input [HDR_WIDTH-1:0]               curr_hdr_start,
+    input [HDR_WIDTH-1:0]               curr_hdr_len,
+    input [offsetWidth - 1 : 0]         offset,
+    input hdr_t                         nxt_hdr_type,
+    input [HDR_WIDTH-1:0]               nxt_hdr_len,
+    input                               pkt_start,
+    input                               proc_dbl_wide,
+    input [`$shiftWidth-1`:0]           shift_amt,
+
+    // Merged signals from the parsers
+    output logic                        merged_nxt_hdr_info_vld,
+    output hdr_t                        merged_curr_hdr_type_nxt,
+    output logic [HDR_WIDTH-1:0]        merged_nxt_hdr_len,
+    output logic [HDR_WIDTH-1:0]        merged_curr_hdr_start_nxt,
+    output logic [HDR_WIDTH-1:0]        merged_curr_hdr_len_nxt,
+
+    output logic                        merged_curr_hdr_info_vld,
+    output logic [HDR_WIDTH-1:0]        merged_curr_hdr_len,
+
+    output logic                        merged_curr_hdr_last_word,
+
+    output logic [offsetWidth - 1 : 0]  merged_offset_nxt,
+
+    output logic [BR_WIDTH-1:0]         merged_buf_rd_amt,
+    output logic [`$shiftWidth-1`:0]    merged_shift_amt_nxt,
+
+    output logic [0:`$mpsl-1`]                merged_found_hdr_nxt,
+    output hdr_t [0:`$mpsl-1`]                merged_found_hdr_type_nxt,
+    output logic [0:`$mpsl-1`][HDR_WIDTH-1:0] merged_found_hdr_pos_nxt,
+
+    // Global Signals
+    input logic                 clk,
+    input logic                 rst
+);
+
+//; ###################################
+//; # Useful functions
+//; ###################################
+//;
+//; sub printOffsetMergeSignals {
+//;     my $offset = shift;
+logic offset_`$offset`_on_path;
+//; foreach my $prevOffset (@sortedOffsets) {
+//;     last if $prevOffset == $offset;
+logic offset_`$offset`_on_path_from_`$prevOffset`;
+//; }
+logic offset_`$offset`_vld;
+logic offset_`$offset`_nxt_vld;
+
+logic [`$foundDestBits-1`:0] offset_`$offset`_found_dst;
+logic [`$numOffsetBits-1`:0] offset_`$offset`_src;
+logic                   offset_`$offset`_parser_exists;
+logic                   offset_`$offset`_final;
+hdr_t                   offset_`$offset`_hdr_type_in;
+
+logic                   offset_`$offset`_nxt_hdr_info_vld;
+hdr_t                   offset_`$offset`_nxt_hdr_type;
+logic [HDR_WIDTH-1:0]   offset_`$offset`_nxt_hdr_len;
+logic [HDR_WIDTH-1:0]   offset_`$offset`_nxt_hdr_proc_pos_inc;
+logic [HDR_WIDTH-1:0]   offset_`$offset`_nxt_hdr_offset_inc;
+logic                   offset_`$offset`_curr_hdr_info_vld;
+logic [HDR_WIDTH-1:0]   offset_`$offset`_curr_hdr_len;
+logic [HDR_WIDTH-1:0]   offset_`$offset`_curr_hdr_last_word_len;
+logic [HDR_WIDTH-1:0]   offset_`$offset`_curr_hdr_last_word_pos;
+logic                   offset_`$offset`_last_word;
+logic [BR_WIDTH-1:0]    offset_`$offset`_buf_rd_amt;
+logic                   offset_`$offset`_last_hdr;
+logic [`$shiftWidth+1-1`:0] offset_`$offset`_shift_amt_nxt_no_wrap;
+logic [`$shiftWidth+1-1`:0] offset_`$offset`_shift_amt_nxt_wrap;
+logic [`$shiftWidth-1`:0] offset_`$offset`_shift_amt_nxt;
+
+//; }
+
+//; sub printOffsetMergeLogic {
+//;     my $offset = shift;
+//;
+//;     # Create individual offset-valid-from-previous-offset signals
+//;     if ($offset != 0) {
+//;         my $pos = 0;
+//;         foreach my $prevOffset (@sortedOffsets) {
+//;             last if ($prevOffset == $offset);
+//;
+//;             print "assign offset_${offset}_on_path_from_${prevOffset} =";
+//;             if ($prevOffset == 0) {
+//;                 if ($offset >= $wordByteWidth) {
+//;                     my $dispOffset = $offset;
+//;                     $dispOffset -= $wordByteWidth if $dispOffset > $wordByteWidth;
+//;                     print " curr_hdr_last_word_pos == hdr_pos + $wordByteWidth && curr_hdr_last_word_len == $dispOffset && proc_dbl_wide ||";
+//;                 } else {
+//;                     print " curr_hdr_last_word_pos == hdr_pos && curr_hdr_last_word_len == $offset ||";
+//;                 }
+//;             } else {
+//;                 print " offset_${prevOffset}_on_path &&";
+//;             }
+//;             print " offset_${prevOffset}_curr_hdr_len == " . ($offset - $prevOffset) . ";\n";
+//;         }
+//;     }
+//;
+//;     # Create the aggreate offset valid signals
+//;     print "assign offset_${offset}_on_path =";
+//;     if ($offset == 0) {
+//;         print " curr_hdr_type != UNKNOWN;\n";
+//;     } else {
+//;         my $pos = 0;
+//;         foreach my $prevOffset (@sortedOffsets) {
+//;             last if ($prevOffset == $offset);
+//;
+//;             print " ||" if $pos++ > 0;
+//;             print " offset_${offset}_on_path_from_${prevOffset}";
+//;         }
+//;         print ";\n";
+//;     }
+//;
+//;     # Does the selected parser exist?
+//;     if ($offset == 0) {
+assign offset_`$offset`_parser_exists = curr_hdr_type != UNKNOWN;
+//;     } else {
+always_comb
+begin
+    unique case (offset_`$offset`_hdr_type_in)
+//;         foreach my $hdrName (sort(keys(%{$parsers->{$offset}}))) {
+//;             my $hdr = getHeader($hdrName);
+//;             my $hdrEnum = $hdr->{'enumName'};
+        `$hdrEnum` : offset_`$offset`_parser_exists = offset_`$offset`_src != 0;
+//;         }
+        default : offset_`$offset`_parser_exists = '0;
+    endcase
+end
+//;     }
+//;
+//;     # Evaluate whether the offset is actually valid
+//;     print "assign offset_${offset}_vld = offset_${offset}_parser_exists";
+//;     if ($offset == 0) {
+//;         print " && offset_${offset}_on_path;\n";
+//;     } else {
+//;         my $pos = 0;
+//;         foreach my $prevOffset (@sortedOffsets) {
+//;             last if ($prevOffset == $offset);
+//;
+//;             if ($pos == 0) {
+//;                 print " && offset_${offset}_last_word && (";
+//;             } else {
+//;                 print " || ";
+//;             }
+//;             print "(offset_${offset}_on_path_from_${prevOffset} && offset_${prevOffset}_vld && offset_${prevOffset}_last_word)";
+//;             $pos++;
+//;         }
+//;         print ");\n";
+//;     }
+//;
+//;     # Where should the found result be placed?
+//;     print "assign offset_${offset}_found_dst = offset_${offset}_on_path ? ";
+//;     print "'0" if $offset == 0;
+//;     my $pos = 0;
+//;     for my $prevOffset (@sortedOffsets) {
+//;         last if $prevOffset == $offset;
+//;         print " + " if $pos++ > 0;
+//;         print "offset_${prevOffset}_on_path";
+//;     }
+//;     print " : '0;\n";
+//;
+//;     # Identify the source to use for the offset
+//;     # and extract the relevat source info
+//;     if ($offset == 0) {
+assign offset_`$offset`_hdr_type_in = curr_hdr_type;
+assign offset_`$offset`_src = '0;
+//;     } else {
+//;         my $lastOffset;
+//;         my $depStr = "{";
+//;         my $numBits = 0;
+//;         foreach my $prevOffset (@sortedOffsets) {
+//;             last if ($prevOffset == $offset);
+//;
+//;             $depStr .= ", " if $numBits++ > 0;
+//;             $depStr .= "offset_${offset}_on_path_from_${prevOffset}";
+//;
+//;             $lastOffset = $prevOffset;
+//;         }
+//;         $depStr .= '}';
+//;
+//;         if ($numBits > 1) {
+//;             my $oneHotDec = generate('one_hot_to_bin', "offset_${offset}_one_hot_to_bin",
+//;                                     InputWidth => $numBits,
+//;                                     SkipLSB => 0, Order => 'ltr',
+//;                             );
+//;             my $outputWidth = log2($numBits + 1);
+`$oneHotDec->instantiate()` ( .in(`$depStr`), .out(offset_`$offset`_src[`$outputWidth-1`:0]));
+//;             if ($numOffsetBits - $outputWidth > 0) {
+assign offset_`$offset`_src[`$numOffsetBits-1`:`$outputWidth`] = '0;
+//;             }
+//;         } else {
+assign offset_`$offset`_src = `$numOffsetBits`'d1;
+//;         }
+
+always_comb
+begin
+    unique case (offset_`$offset`_src)
+//;         my $pos = 0;
+//;         while (1) {
+//;             my $prevOffset = $sortedOffsets[$pos];
+//;             last if ($prevOffset == $offset);
+//;
+//;             print "        ";
+//;             print $prevOffset == $lastOffset ? 'default' : $pos + 1;
+//;             print " : offset_${offset}_hdr_type_in = offset_${prevOffset}_nxt_hdr_type;\n";
+//;             $pos++;
+//;         }
+    endcase
+end
+//;     }
+
+//;     # Is the next header valid?
+always_comb
+begin
+//;     if ($offset == 0) {
+    if (curr_hdr_last_word_pos == hdr_pos) begin
+        unique case (offset_`$offset`_curr_hdr_last_word_len)
+//;         my $pos = 0;
+//;         foreach my $nextOffset (@sortedOffsets) {
+//;             next if ($nextOffset == $offset);
+//;
+            `$nextOffset - $offset` : offset_`$offset`_nxt_vld = offset_`$nextOffset`_parser_exists && offset_`$nextOffset`_last_word;
+//;         }
+            default : offset_`$offset`_nxt_vld = '0;
+        endcase
+    end
+//;         if ($useDblWide) {
+    else if (curr_hdr_last_word_pos == hdr_pos + `$wordByteWidth` && proc_dbl_wide) begin
+        unique case (offset_`$offset`_curr_hdr_last_word_len)
+//;             my $pos = 0;
+//;             foreach my $nextOffset (@sortedOffsets) {
+//;                 next if ($nextOffset <= $offset || $nextOffset < $wordByteWidth);
+//;
+            `$nextOffset - $offset - $wordByteWidth` : offset_`$offset`_nxt_vld = offset_`$nextOffset`_parser_exists && offset_`$nextOffset`_last_word;
+//;             }
+            default : offset_`$offset`_nxt_vld = '0;
+        endcase
+    end
+//;         }
+    else begin
+        offset_`$offset`_nxt_vld = '0;
+    end
+//;     } else {
+    unique case (offset_`$offset`_curr_hdr_len)
+//;         my $pos = 0;
+//;         foreach my $nextOffset (@sortedOffsets) {
+//;             next if ($nextOffset <= $offset);
+//;
+        `$nextOffset - $offset` : offset_`$offset`_nxt_vld = offset_`$nextOffset`_parser_exists && offset_`$nextOffset`_last_word;
+//;         }
+        default : offset_`$offset`_nxt_vld = '0;
+    endcase
+//;     }
+end
+
+//;     # Process the output from the correct parser at each offset
+always_comb
+begin
+    unique case (offset_`$offset`_hdr_type_in)
+//;     my @hdrNames = sort(keys(%{$parsers->{$offset}}));
+//;     my $lastHdrName = $hdrNames[-1];
+//;     foreach my $hdrName (@hdrNames) {
+//;         my $hdr = getHeader($hdrName);
+//;         my $hdrEnum = $hdr->{'enumName'};
+//;         my $iface = makeParserIfaceName($hdrName, $offset);
+        `$hdrEnum` : begin
+            offset_`$offset`_nxt_hdr_info_vld = `$iface`.nxt_hdr_info_vld;
+            offset_`$offset`_nxt_hdr_type = `$iface`.nxt_hdr_type;
+            offset_`$offset`_nxt_hdr_len = `$iface`.nxt_hdr_len;
+            offset_`$offset`_nxt_hdr_proc_pos_inc = `$iface`.nxt_hdr_proc_pos_inc;
+            offset_`$offset`_nxt_hdr_offset_inc = `$iface`.nxt_hdr_offset_inc;
+            offset_`$offset`_curr_hdr_info_vld = `$iface`.curr_hdr_info_vld;
+            offset_`$offset`_curr_hdr_len = `$iface`.curr_hdr_len;
+            offset_`$offset`_curr_hdr_last_word_len = `$iface`.curr_hdr_last_word_len;
+            offset_`$offset`_curr_hdr_last_word_pos = `$iface`.curr_hdr_last_word_pos;
+            offset_`$offset`_last_word = `$iface`.last_word;
+
+//; if (`$offset` == 0) {
+            offset_`$offset`_last_hdr =
+                    (`$iface`.nxt_hdr_info_vld && `$iface`.nxt_hdr_type == UNKNOWN) ||
+                    (!`$iface`.nxt_hdr_info_vld && nxt_hdr_type == UNKNOWN);
+//; } else {
+            offset_`$offset`_last_hdr =
+                    `$iface`.nxt_hdr_info_vld && `$iface`.nxt_hdr_type == UNKNOWN;
+//; }
+
+//; if (!$useDblWide) {
+            offset_`$offset`_shift_amt_nxt_no_wrap = {1'b0, shift_amt} + `$iface`.shift_amt_inc;
+            offset_`$offset`_shift_amt_nxt_wrap = {1'b0, shift_amt} + `$iface`.shift_amt_inc - `$wordByteWidth`;
+            if (offset_`$offset`_last_hdr)
+                offset_`$offset`_shift_amt_nxt = '0;
+            else if (offset_`$offset`_shift_amt_nxt_no_wrap < `$wordByteWidth`)
+                offset_`$offset`_shift_amt_nxt = offset_`$offset`_shift_amt_nxt_no_wrap[`$shiftWidth-1`:0];
+            else
+                offset_`$offset`_shift_amt_nxt = offset_`$offset`_shift_amt_nxt_wrap[`$shiftWidth-1`:0];
+
+            if (offset_`$offset`_shift_amt_nxt_no_wrap < `$wordByteWidth`)
+                offset_`$offset`_buf_rd_amt = `$iface`.buf_rd_amt;
+            else
+                offset_`$offset`_buf_rd_amt = `$iface`.buf_rd_amt - 1;
+//; } else {
+            if (proc_dbl_wide) begin
+                offset_`$offset`_shift_amt_nxt_no_wrap = {1'b0, shift_amt} + `$iface`.shift_amt_inc - `$wordByteWidth`;
+                offset_`$offset`_shift_amt_nxt_wrap = {1'b0, shift_amt} + `$iface`.shift_amt_inc - `$wordByteWidth` - `$wordByteWidth`;
+            end
+            else begin
+                offset_`$offset`_shift_amt_nxt_no_wrap = {1'b0, shift_amt} + `$iface`.shift_amt_inc;
+                offset_`$offset`_shift_amt_nxt_wrap = {1'b0, shift_amt} + `$iface`.shift_amt_inc - `$wordByteWidth`;
+            end
+
+            if (`$iface`.buf_rd_amt > 1 && offset_`$offset`_shift_amt_nxt_no_wrap >= `$wordByteWidth`) begin
+                offset_`$offset`_shift_amt_nxt = offset_`$offset`_shift_amt_nxt_wrap;
+                offset_`$offset`_buf_rd_amt = `$iface`.buf_rd_amt - 1;
+            end
+            else begin
+                offset_`$offset`_shift_amt_nxt = offset_`$offset`_shift_amt_nxt_no_wrap;
+                if (`$iface`.buf_rd_amt < 1)
+                    offset_`$offset`_buf_rd_amt = 1;
+                else
+                    offset_`$offset`_buf_rd_amt = `$iface`.buf_rd_amt;
+            end
+//; }
+
+//;         if ($offset == 0) {
+            offset_`$offset`_final = !offset_`$offset`_vld || !`$iface`.last_word || (`$iface`.nxt_hdr_info_vld && `$iface`.nxt_hdr_type == UNKNOWN) || !offset_`$offset`_nxt_vld;
+//;         } else {
+            offset_`$offset`_final = offset_`$offset`_vld && `$iface`.last_word && !offset_`$offset`_nxt_vld;
+//;         }
+        end
+//;     }
+        default : begin
+            offset_`$offset`_nxt_hdr_info_vld = '0;
+            offset_`$offset`_nxt_hdr_type = UNKNOWN;
+            offset_`$offset`_nxt_hdr_len = '0;
+            offset_`$offset`_nxt_hdr_proc_pos_inc = '0;
+            offset_`$offset`_nxt_hdr_offset_inc = '0;
+            offset_`$offset`_curr_hdr_info_vld = '0;
+            offset_`$offset`_curr_hdr_len = '0;
+            offset_`$offset`_curr_hdr_last_word_len = '0;
+            offset_`$offset`_curr_hdr_last_word_pos = '0;
+            offset_`$offset`_last_word = '0;
+
+            offset_`$offset`_shift_amt_nxt_no_wrap = '0;
+            offset_`$offset`_shift_amt_nxt_wrap = '0;
+            offset_`$offset`_shift_amt_nxt = '0;
+            offset_`$offset`_buf_rd_amt = '0;
+//;         if ($offset == 0) {
+            offset_`$offset`_final = '1;
+//;         } else {
+            offset_`$offset`_final = '0;
+//;         }
+        end
+    endcase
+end
+//; }
+
+
+//; ###################################
+//; # Main code
+//; ###################################
+
+//; # Create the various combinations of hdr_done signals
+//;
+//; # Sort the sequences by location/name
+//; my @sortedSeqs = sortParserSeqLen(@$parserSeqs);
+
+//; print STDOUT "Creating parser merge logic:\n";
+
+// Extract the last_word_len/num_words from the first parser
+logic [HDR_WIDTH-1:0]           curr_hdr_last_word_len;
+logic [HDR_WIDTH-1:0]           curr_hdr_last_word_pos;
+
+always_comb
+begin
+    unique case (curr_hdr_type)
+//; my @hdrNames = sort(keys(%{$parsers->{0}}));
+//; my $lastHdrName = $hdrNames[-1];
+//; foreach my $hdrName (@hdrNames) {
+//;     my $hdr = getHeader($hdrName);
+//;     my $hdrEnum = $hdr->{'enumName'};
+//;     my $iface = makeParserIfaceName($hdrName, 0);
+        `$hdrName eq $lastHdrName ? 'default' : $hdrEnum` : begin
+            curr_hdr_last_word_len = `$iface`.curr_hdr_last_word_len;
+            curr_hdr_last_word_pos = `$iface`.curr_hdr_last_word_pos;
+        end
+//; }
+    endcase
+end
+
+// OFFSET MERGE SIGNALS
+//; foreach my $offset (@sortedOffsets) {
+//;     printOffsetMergeSignals($offset);
+//; }
+
+// OFFSET MERGE LOGIC
+//; foreach my $offset (@sortedOffsets) {
+//;     printOffsetMergeLogic($offset);
+//; }
+
+
+// Identify the source of each found signal
+//; my $numOffsetBitsP1 = log2($numOffsets + 1);
+//; for (my $i = 0; $i < $mpsl; $i++) {
+logic [`$numOffsetBitsP1-1`:0] found_`$i`_src;
+//; }
+
+assign found_0_src = '0;
+always_comb
+begin
+//; for (my $i = 1; $i < $mpsl; $i++) {
+//;     print "\n" if $i > 1;
+//;     for (my $j = $i; $j < scalar(@sortedOffsets); $j++) {
+//;         my $offset = $sortedOffsets[$j];
+//;         print "    ";
+//;         print "else " if $i != $j;
+//;         print "if (offset_${offset}_found_dst == $i)\n";
+        found_`$i`_src = `$offset`;
+//;     }
+//;     if ($i < scalar(@sortedOffsets)) {
+    else
+        found_`$i`_src = `$numOffsets`;
+//;     } else {
+    found_`$i`_src = `$numOffsets`;
+//;     }
+//; }
+end
+
+// Merged found header logic
+always_comb
+begin
+//; for (my $i = 0; $i < $mpsl; $i++) {
+//;     print "\n" if $i > 0;
+    unique case (found_`$i`_src)
+//;     for my $offset (@sortedOffsets) {
+        `$offset` : begin
+            merged_found_hdr_nxt[`$i`] = offset_`$offset`_nxt_hdr_info_vld & offset_`$offset`_vld;
+            merged_found_hdr_type_nxt[`$i`] = offset_`$offset`_nxt_hdr_type;
+//;         if ($offset == 0) {
+            merged_found_hdr_pos_nxt[`$i`] = curr_hdr_start + offset_`$offset`_curr_hdr_len;
+//;         } else {
+            merged_found_hdr_pos_nxt[`$i`] = curr_proc_pos + `$offset` + offset_`$offset`_curr_hdr_len;
+//;         }
+        end
+//;     }
+        default : begin
+            merged_found_hdr_nxt[`$i`] = '0;
+            merged_found_hdr_type_nxt[`$i`] = UNKNOWN;
+            merged_found_hdr_pos_nxt[`$i`] = '0;
+        end
+    endcase
+//; }
+end
+
+// Generate the other merged output signals
+always_comb
+begin
+//; my $numOffsets = scalar(@sortedOffsets);
+//; print "    unique case ({";
+//; foreach my $offset (@sortedOffsets) {
+//;     print ", " if $offset != 0;
+//;     print "offset_${offset}_final";
+//; }
+//; print "})\n";
+//; for (my $i = 0; $i < $numOffsets; $i++) {
+//;     my $offset = $sortedOffsets[$i];
+//;     if ($i == $numOffsets - 1) {
+        default : begin
+//;     } else {
+        `"${numOffsets}'b" . ("0" x $i) . "1" . ("0" x ($numOffsets - $i - 1))` : begin
+//;     }
+            merged_nxt_hdr_info_vld =   offset_`$offset`_nxt_hdr_info_vld;
+            merged_nxt_hdr_len =        offset_`$offset`_nxt_hdr_len;
+
+            merged_curr_hdr_last_word = offset_`$offset`_last_word;
+
+            merged_curr_hdr_info_vld =  offset_`$offset`_curr_hdr_info_vld;
+            merged_curr_hdr_len =       offset_`$offset`_curr_hdr_len;
+//;     if ($offset == 0) {
+            merged_curr_hdr_start_nxt = curr_hdr_start + offset_`$offset`_curr_hdr_len;
+            if (offset_`$offset`_nxt_hdr_info_vld) begin
+                merged_curr_hdr_type_nxt = offset_`$offset`_nxt_hdr_type;
+                merged_curr_hdr_len_nxt = offset_`$offset`_nxt_hdr_len;
+            end
+            else begin
+                merged_curr_hdr_type_nxt = nxt_hdr_type;
+                merged_curr_hdr_len_nxt = nxt_hdr_len;
+            end
+//;     } else {
+            merged_curr_hdr_start_nxt = curr_proc_pos + offset_`$offset`_nxt_hdr_proc_pos_inc;
+            merged_curr_hdr_type_nxt = offset_`$offset`_nxt_hdr_type;
+            merged_curr_hdr_len_nxt = offset_`$offset`_nxt_hdr_len;
+//;     }
+
+            if (proc_dbl_wide && `$useDblWide ? '1' : '0'`)
+                merged_offset_nxt = offset + offset_`$offset`_nxt_hdr_offset_inc - `$wordByteWidth`;
+            else
+                merged_offset_nxt = offset + offset_`$offset`_nxt_hdr_offset_inc;
+
+            merged_shift_amt_nxt = offset_`$offset`_shift_amt_nxt;
+            merged_buf_rd_amt = offset_`$offset`_buf_rd_amt;
+        end
+//; }
+    endcase
+end
+
+
+//////////////////////////////////////
+// Array extraction
+//////////////////////////////////////
+
+//; createIfcInsts($ifc, $ifcDblWide);
+//; copyIfcFromArray();
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+string                          hdrSeq;
+logic                           nxtHdrVld;
+
+always @(posedge clk)
+begin
+    hdrSeq = "";
+    nxtHdrVld = 0;
+//; foreach my $offset (@sortedOffsets) {
+    if (offset_`$offset`_vld && offset_`$offset`_nxt_hdr_info_vld) begin
+//;     if ($offset > 0) {
+            hdrSeq = {hdrSeq, " ", offset_`$offset`_nxt_hdr_type.name};
+//;     } else {
+            hdrSeq = offset_`$offset`_nxt_hdr_type.name;
+//;     }
+        nxtHdrVld = 1;
+    end
+//; }
+    if (pkt_pos >= curr_hdr_start && nxtHdrVld)
+        $display("%t: Next header(s): %s", $time, hdrSeq);
+end
+
+// Attempt to ensure that only one valid signal is asserted at any one time
+always @(posedge clk)
+begin
+    // FIXME: write this code!
+end
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

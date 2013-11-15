@@ -1,0 +1,418 @@
+////////////////////////////////////////////////////////////////
+// hdr_ident_fixed.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Header identification module for a fixed parser
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//; use List::Util;
+//;
+//; # PARAMETERS:
+//; my $debug = parameter( name=>'Debug', val=>0,
+//;                               doc=>'!DEBUG! Debug message output level',
+//;                               min=>0 , max=>10, step=>1);
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $useDblWide = parameter( name=>'UseDblWide', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable processing of double-width words',
+//;                               list=>[0, 1]);
+//;
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $widthMult = $useDblWide ? 2 : 1;
+//;
+//; # Calculate the locations/sequences of parsers
+//; # (need to do this now to identify the maximum parsers in a single cycle)
+//; my ($parsers, $parserSeqs, $wideParsers, $maxLag, $maxLagSeq) = getParserLocs();
+//; my $maxParserSeqLen = maxParserSeqLen();
+//; my $bufLen = 1 + POSIX::ceil($maxLag / $wordByteWidth);
+//; $bufLen += 1 if $bufLen == 1 && $useDblWide;
+//;
+//; my $numIfcSW = getIfcArrayLen();
+//; my $numIfcDW = getIfcArrayLenDW();
+//;
+//; my $shiftWidth = log2($wordByteWidth * $widthMult);
+//; setShiftWidth($shiftWidth);
+//;
+//; my $maxShiftAmt = List::Util::min($maxLag, $widthMult * $wordByteWidth);
+
+
+import parser_pkg::*;
+
+// Module to decode header types and lengths
+module `mname()`
+(
+    //Input Signals
+    input logic [ `$wordBitWidth-1` : 0]    pkt_data,
+    input logic                             pkt_data_vld,
+    input logic [ `$wordByteWidth-1` : 0]   pkt_end,
+
+    //Output Signals
+    output logic [0:`$maxParserSeqLen-1`]                found_hdr,
+    output hdr_t [0:`$maxParserSeqLen-1`]                found_hdr_type,
+    output logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] found_hdr_pos,
+
+    output logic                                         pkt_done,
+
+    output logic [HDR_WIDTH-1:0]    curr_proc_pos,
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+////////////////////////////////////////
+// Local variables
+////////////////////////////////////////
+
+wire [ 0:`$widthMult * $wordBitWidth - 1`]   shifted_data;
+wire [ 0:`$widthMult * $wordByteWidth - 1`]  shifted_end;
+
+// Delayed versions of some signals
+//; if ($bufLen > 0) {
+//;     my $bufMult = $widthMult + ($bufLen > 1 ? 1 : 0);
+logic [`$bufMult * $wordBitWidth - 1` : 0]  buf_data;
+logic [`$bufMult * $wordByteWidth - 1` : 0] buf_end;
+//; }
+
+
+logic [HDR_WIDTH-1:0] pkt_pos, pkt_pos_nxt;
+logic [HDR_WIDTH-1:0] hdr_pos;
+hdr_t curr_hdr_type;
+logic [HDR_WIDTH-1:0] curr_hdr_start;
+logic [offsetWidth - 1 : 0] offset;
+
+logic                           in_pkt;
+logic                           shifted_vld;
+
+logic                           pkt_done_nxt;
+
+logic                           proc_dbl_wide;
+
+logic [HDR_WIDTH-1:0]           curr_hdr_len;
+
+hdr_t                           nxt_hdr_type;
+logic [HDR_WIDTH-1:0]           nxt_hdr_len;
+logic [offsetWidth - 1 : 0]     nxt_hdr_offset;
+
+logic [`$shiftWidth-1` : 0]     shift_amt;
+logic [BR_WIDTH-1 : 0]          buf_rd_amt;
+wire                            empty;
+
+// Signals from the interfaces
+logic                           merged_nxt_hdr_info_vld;
+hdr_t                           merged_curr_hdr_type_nxt;
+logic [ HDR_WIDTH-1:0]          merged_nxt_hdr_len;
+logic [ HDR_WIDTH-1:0]          merged_curr_hdr_start_nxt;
+logic [ HDR_WIDTH-1:0]          merged_curr_hdr_len_nxt;
+
+logic                           merged_curr_hdr_info_vld;
+logic [ HDR_WIDTH-1:0]          merged_curr_hdr_len;
+
+logic                           merged_curr_hdr_last_word;
+
+logic [offsetWidth - 1 : 0]     merged_offset_nxt;
+
+logic [BR_WIDTH-1:0]            merged_buf_rd_amt;
+logic [`$shiftWidth-1` : 0]     merged_shift_amt_nxt;
+
+logic [0:`$maxParserSeqLen-1`]                merged_found_hdr_nxt;
+hdr_t [0:`$maxParserSeqLen-1`]                merged_found_hdr_type_nxt;
+logic [0:`$maxParserSeqLen-1`][HDR_WIDTH-1:0] merged_found_hdr_pos_nxt;
+
+
+////////////////////////////////////////
+// Parser instantiation
+////////////////////////////////////////
+
+// Generic interface
+//; # First we create an interface for the individual parsers...
+//; my $ifc = generate('parser_ifc', 'ifc', WordWidth => $wordByteWidth, DblWide => 0, ShiftDblWide => $useDblWide);
+//;
+//; # ...and enable others to use this interface
+//; parameter(Name=>'IfcPtr', Val=>$ifc, force=>1, Doc=>"Declaring our interface object for others to use");
+//;
+//; # Create a double-wide interface if appropriate
+//; my $ifcDblWide;
+//; if ($useDblWide) {
+//;     $ifcDblWide = generate('parser_ifc', 'ifc_dbl_wide', WordWidth => $wordByteWidth, DblWide => 1, ShiftDblWide => $useDblWide);
+//;     parameter(Name=>'IfcDblWidePtr', Val=>$ifcDblWide, force=>1, Doc=>"Declaring our interface object for others to use");
+//; }
+
+
+//; # Generate a buffer/shifter if we need to buffer data
+//; # (This should be true for all parse graphs with non-aligned headers)
+//; if ($bufLen > 0) {
+// Buffer
+//; my $hdr_decode_buf = generate('hdr_decode_buffer', 'hdr_decode_buffer',
+//;                         WordWidth => $wordByteWidth,
+//;                         Depth => $bufLen,
+//;                         WideRead => $bufLen > 1 ? 1 : 0,
+//;                         DblWideRead => $useDblWide);
+    `$hdr_decode_buf->instantiate()`
+    (
+        //Input Signals
+        .pkt_wr_en (pkt_data_vld),
+        .pkt_data_in (pkt_data),
+        .pkt_end_in (pkt_end),
+
+        //Output Signals
+        .pkt_rd_en (!empty),
+        .pkt_rd_amt (buf_rd_amt),
+        .pkt_data_out (buf_data),
+        .pkt_end_out (buf_end),
+
+        .empty (empty),
+        .nearly_full (),
+        .full (),
+
+        //Global Signals
+        .clk (clk),
+        .rst (rst | pkt_done)
+    );
+
+//; if ($bufLen > 1) {
+// Shifter
+//; my $pktDataShifter = generate('shifter', 'pkt_data_shifter',
+//;                         InputWidth => (1 + $widthMult) * $wordBitWidth,
+//;                         OutputWidth => $widthMult * $wordBitWidth,
+//;                         ShiftMult => 8,
+//;                         ShiftBits => log2($widthMult * $wordByteWidth),
+//;                         MaxShiftAmt => $maxShiftAmt,
+//;                         ShiftOffset => $useDblWide ? -$wordByteWidth : 0);
+    `$pktDataShifter->instantiate()`
+    (
+        //Input Signals
+        .in_data (buf_data),
+        .shift_amt (shift_amt),
+
+        //Output Signals
+        .out_data (shifted_data)
+    );
+//; my $hdb_pktEndShifter = generate('shifter', 'pkt_end_shifter',
+//;                         InputWidth => (1 + $widthMult) * $wordByteWidth,
+//;                         OutputWidth => $widthMult * $wordByteWidth,
+//;                         ShiftMult => 1,
+//;                         ShiftBits => log2($widthMult * $wordByteWidth),
+//;                         MaxShiftAmt => $maxShiftAmt,
+//;                         ShiftOffset => $useDblWide ? -$wordByteWidth : 0);
+    `$hdb_pktEndShifter->instantiate()`
+    (
+        //Input Signals
+        .in_data (buf_end),
+        .shift_amt (shift_amt),
+
+        //Output Signals
+        .out_data (shifted_end)
+    );
+//; } else {
+assign shifted_data = buf_data;
+assign shifted_end = buf_end;
+//; }
+
+//; } else {
+assign shifted_data = pkt_data;
+assign shifted_end = pkt_end;
+//; }
+
+// Parsers and interfaces that connect to the parsers
+    assign proc_dbl_wide = `$useDblWide ? "offset >= $wordByteWidth" : "'0"`;
+//; if ($numIfcSW > 0) {
+    `$ifc->mname()` parser_ifcs[`$numIfcSW-1`:0] ();
+//; }
+//; if ($numIfcDW > 0) {
+    `$ifcDblWide->mname()` parser_ifcs_wide[`$numIfcDW-1`:0] ();
+//; }
+//;
+//; # Now actually create the parsers/interfaces
+//; my %parser_ifcs;
+//; my %parser_insts;
+//; print STDOUT "Creating parsers/interfaces:\n";
+//; my @offsets = sort(keys(%$parsers));
+//; foreach my $offset (@offsets) {
+//;     print STDOUT "  Offset $offset:";
+//;     $parser_ifcs{$offset} = {} if (!defined($parser_ifcs{$offset}));
+//;     $parser_insts{$offset} = {} if (!defined($parser_insts{$offset}));
+//;
+//;     foreach my $hdrName (sort(keys(%{$parsers->{$offset}}))) {
+//;         print STDOUT " $hdrName";
+//;         if (!defined($parser_ifcs{$offset}{$hdrName})) {
+//;             # Create the new interface
+//;             my $hdr = getHeader($hdrName);
+//;             my $hdrEnum = $hdr->{'enumName'};
+//;             my $hdrLastDecByte = getLastDecByte($hdrName) + 1;
+//;             my $hdrDblWide = $useDblWide & defined($wideParsers->{$offset}->{$hdrName});
+//;             my $shifterDataWidth = $useDblWide ? ($widthMult * $wordByteWidth) : $wordByteWidth;
+//;             my $parserDataWidth = ($hdrDblWide ? ($widthMult * $wordByteWidth) : $wordByteWidth);
+//;             my $decPos = $hdrLastDecByte > 0 ? $hdrLastDecByte : List::Util::min(@{$hdr->{'lengths'}});
+//;             my $parserInputWidth = List::Util::min(($decPos, $shifterDataWidth - $offset, $parserDataWidth));
+//;             $parserInputWidth = 1 if $parserInputWidth < 1;
+//;             my $new_ifc;
+//;             my $new_ifc_data;
+//;             if ($hdrDblWide) {
+//;                 $new_ifc = clone($ifcDblWide, "${hdrEnum}_${offset}_parser_ifc");
+//;             } else {
+//;                 $new_ifc = clone($ifc, "${hdrEnum}_${offset}_parser_ifc");
+//;             }
+//;             if ($parserInputWidth == $parserDataWidth) {
+//;                 $new_ifc_data = "shifted_data[" . ($offset*8) . ":" . (($offset + $parserInputWidth) * 8 - 1) . "]";
+//;             } else {
+//;                 $new_ifc_data = "{shifted_data[" . ($offset*8) . ":" . (($offset + $parserInputWidth) * 8 - 1) . "], " . (($parserDataWidth - $parserInputWidth) * 8) . "'b0}";
+//;             }
+    `$new_ifc->instantiate()` ( .* );
+    assign `$new_ifc->iname`.data = `$new_ifc_data`;
+    assign `$new_ifc->iname`.data_vld = shifted_vld;
+
+    assign `$new_ifc->iname`.hdr_pos = `$offset == 0 ? 'hdr_pos' : "'0"`;
+//; if ($useDblWide && $hdrDblWide) {
+    assign `$new_ifc->iname`.this_dbl_wide = `$hdrDblWide ? "offset >= $wordByteWidth" : "'0"`;
+//; }
+    assign `$new_ifc->iname`.all_dbl_wide = `$useDblWide ? "offset >= $wordByteWidth" : "'0"`;
+
+//;             # Create a parser instance
+//;             my $new_inst = generate("generic_hdr_proc", "${hdrEnum}_${offset}_proc_inst",
+//;                     HeaderName => $hdrName, WordWidth => $wordByteWidth,
+//;                     DblWideEn => $useDblWide, ThisDblWide => $hdrDblWide,
+//;                     Offset => $offset, genericProcParams($hdr));
+    `$new_inst->instantiate()`
+    (
+        .ifc (`$new_ifc->iname`.parser),
+
+        //Global Signals
+        .clk (clk),
+        .rst (rst)
+    );
+
+
+//;             $parser_ifcs{$offset}{$hdrName} = $new_ifc;
+//;             $parser_insts{$offset}{$hdrName} = $new_inst;
+//;         }
+//;     }
+//;     print STDOUT "\n";
+//; }
+//; print STDOUT "\n";
+
+//; copyIfcToArray();
+
+//; my $merge_parsers = generate('merge_parsers', 'merge_parsers',
+//;                              WordWidth => $wordByteWidth, UseDblWide => $useDblWide);
+    `$merge_parsers->instantiate()` (
+//; foreach my $offset (@offsets) {
+//;     foreach my $hdrName (sort(keys(%{$parsers->{$offset}}))) {
+//;         my $hdr = getHeader($hdrName);
+//;         my $hdrEnum = $hdr->{'enumName'};
+//;         my $ifcName = "${hdrEnum}_${offset}_parser_ifc";
+        //.`"$ifcName"` (`"$ifcName"`.observer),
+//;     }
+//; }
+//; if ($numIfcSW > 0) {
+        .parser_ifcs (parser_ifcs),
+//; }
+//; if ($numIfcDW > 0) {
+        .parser_ifcs_wide (parser_ifcs_wide),
+//; }
+//;
+        .pkt_start (!in_pkt),
+        .*
+    );
+
+
+////////////////////////////////////////
+// Main logic
+////////////////////////////////////////
+
+// State machine
+logic                             pkt_data_vld_d1;
+logic [ `$wordByteWidth-1` : 0]   pkt_end_d1;
+
+always_ff @(posedge clk or posedge rst)
+begin
+    if (rst) begin
+        pkt_data_vld_d1 <= '0;
+        pkt_end_d1 <= '0;
+    end
+    else begin
+        pkt_data_vld_d1 <= pkt_data_vld;
+        pkt_end_d1 <= pkt_end;
+    end
+end
+//;
+//; my $decodeStateMachine = generate('hif_state',
+//;                         'hif_state',
+//;                         WordWidth => $wordByteWidth,
+//;                         UseDblWide => $useDblWide);
+    `$decodeStateMachine->instantiate()`
+    (
+        .pkt_data_vld (pkt_data_vld_d1),
+        .pkt_end (pkt_end_d1),
+
+        .*
+    );
+
+
+
+////////////////////////////////////////
+// Verification code
+////////////////////////////////////////
+
+// synthesis translate_off
+// synopsys translate_off
+
+initial
+begin
+//; my @parserNames;
+//; foreach my $offset (sort(keys(%parser_insts))) {
+//;     foreach my $hdrName (sort(keys(%{$parser_insts{$offset}}))) {
+//;         push @parserNames, $parser_insts{$offset}{$hdrName}->iname;
+//;     }
+//; }
+    $display("%t: Parsers: `join(' ', @parserNames)`", $time);
+end
+
+//; if ($debug >= 2) {
+hdr_t fht;
+always @(posedge clk)
+begin
+    // Display the headers that are found
+    if (found_hdr) begin
+        $write("%t: FOUND HEADER:", $time);
+        for (int i = 0; i < `$maxParserSeqLen`; i++) begin
+            if (found_hdr[i]) begin
+                // Shouldn't need to do this, but VCS pukes otherwise...
+                fht = found_hdr_type[i];
+                $write("  %1s:%1d", fht.name, found_hdr_pos[i]);
+            end
+        end
+        $write("\n");
+    end
+
+    if (shifted_vld) begin
+        if (pkt_pos >= curr_hdr_start + hdr_pos + offset + `$wordByteWidth` && curr_hdr_type != UNKNOWN) begin
+            $display("%t: =======================================================================================", $time);
+            $display("%t: ERROR: Dropping data: Pkt pos: %d   Curr hdr start: %d   Hdr pos: %d   Offset: %d", $time, pkt_pos, curr_hdr_start, hdr_pos, offset);
+            $display("%t: =======================================================================================", $time);
+        end
+    end
+end
+//; }
+
+// Attempt to prevent run-away processing
+always @(posedge clk)
+begin
+    if (pkt_pos_nxt < pkt_pos && !pkt_done_nxt) begin
+        $display("%t: =======================================================================================", $time);
+        $display("%t: ERROR: Suspected processing loop; pkt pos appears to be looping: %d -> %d", $time, pkt_pos, pkt_pos_nxt);
+        $display("%t: =======================================================================================", $time);
+        $finish;
+    end
+end
+
+// synopsys translate_on
+// synthesis translate_on
+
+endmodule : `mname`

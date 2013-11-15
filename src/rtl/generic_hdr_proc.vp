@@ -1,0 +1,337 @@
+////////////////////////////////////////////////////////////////
+// generic_hdr_proc.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   A generic processor for any header type.
+//
+//   The module:
+//     - identifies the length of the header
+//     - identifies the next header type
+//
+////////////////////////////////////////////////////////////////
+
+//; # Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//; # ===========
+//; # PARAMETERS:
+//; # ===========
+//;
+//; my $minHdrLen = 4;
+//; my $maxHdrLen = 128;
+//; my $hdrStep = 1;
+//; my $hdrName  = parameter(name=>'HeaderName', val=>"" ,
+//;                               doc=>'!NON-FUNCTIONAL! Header type to be processed');
+//; my $wordByteWidth  = parameter(name=>'WordWidth', val=>4 ,
+//;                               doc=>'!FUNCTIONAL! Word width of the parser (bytes)' ,
+//;                               min=>1 , max=>128, step=>1 );
+//; my $dblWideEn = parameter(name=>'DblWideEn', val=>0,
+//;                               doc=>'!FUNCTIONAL! Double-width processing is enabled somewhere in the design',
+//;                               list=>[0, 1]);
+//; my $thisDblWide = parameter(name=>'ThisDblWide', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable double-width processing for *this* parser',
+//;                               list=>[0, 1]);
+//; my $hdrLen  = parameter(name=>'HdrLen', val=>0 ,
+//;                               doc=>'!FUNCTIONAL! Length of the header (0 means variable)' ,
+//;                               min=>0 , max=>$maxHdrLen, step=>$hdrStep);
+//; my $hdrLenBytes = parameter(name=>'HdrLenBytes', val=>
+//;		[ ],
+//;		doc=>"List of bytes to extract to identify the header length" );
+//; # Map -- empty by default
+//; # (Note: periods are replaced by question marks)
+//; # Example entries (IPv4):
+//; #               {match => "8'h.5", len => 20},
+//; #               {match => "8'h.6", len => 24},
+//; #               {match => "8'h.7", len => 28},
+//; #               {match => "8'h.8", len => 32},
+//; #               {match => "default", len => 20},
+//; my $hdrLenMap = parameter(name=>'HdrLenMap', val=>
+//;             [
+//;             ],
+//;             doc=>'!FUNCTIONAL! Map of header length bytes to header length' );
+//; my $nxtHdrBytes = parameter(name=>'NxtHdrBytes', val=>
+//;		[ ],
+//;		doc=>"List of bytes to extract to identify the next header" );
+//; # Map -- default to UNKNOWN
+//; # (Note: periods are replaced by question marks)
+//; # Example entries (IPv4):
+//; #               {match => "24'h.00001", nxt_hdr => 'UNKNOWN', nxt_hdr_len => 0},
+//; #               {match => "24'h.00006", nxt_hdr => 'TCP', nxt_hdr_len => 0},
+//; #               {match => "24'h.00011", nxt_hdr => 'UNKNOWN', nxt_hdr_len => 0},
+//; #               {match => 'default', nxt_hdr => 'UNKNOWN', nxt_hdr_len => 0},
+//; my $nxtHdrMap = parameter(name=>'NxtHdrMap', val=>
+//;             [
+//;                 {match => 'default', nxt_hdr => 'UNKNOWN', nxt_hdr_len => 0},
+//;             ],
+//;             doc=>'!FUNCTIONAL! Map of next header bytes to next header variable');
+//; my $offset  = parameter( name=>'Offset', val=>0 ,
+//;                               doc=>'!FUNCTIONAL! Offset of this header within the current word',
+//;                               min=>0 , max=>$maxHdrLen);
+//;
+//;
+//; # Ensure that the word width is recorded
+//; # FIXME: This shouldn't need to be here
+//; setWordWidth($wordByteWidth);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//;
+//;
+//; # Verify validity of the parameters
+//; # ---------------------------------
+//; # Idenfity the last byte to extract
+//; my $lastLenByte = -1;
+//; foreach my $lenByte (@$hdrLenBytes) {
+//;     $self->error('Header length bytes must be between 0 and ' . ($maxHdrLen - 1) . ' inclusive')
+//;         unless ($lenByte >= 0 && $lenByte < $maxHdrLen);
+//;     $lastLenByte = $lenByte if $lenByte > $lastLenByte;
+//; }
+//;
+//; my $lastNxtHdrByte = -1;
+//; foreach my $nxtHdrByte (@$nxtHdrBytes) {
+//;     $self->error('Next header bytes must be between 0 and ' . ($maxHdrLen - 1) . ' inclusive')
+//;         unless ($nxtHdrByte >= 0 && $nxtHdrByte < $maxHdrLen);
+//;     $lastNxtHdrByte = $nxtHdrByte if $nxtHdrByte > $lastNxtHdrByte;
+//; }
+//;
+//; my $lastExtractByte = $lastLenByte > $lastNxtHdrByte ? $lastLenByte : $lastNxtHdrByte;
+//; $lastExtractByte = 0 if $lastExtractByte < 0;
+//;
+//;
+//; # Ensure a length is specified or length bytes/length map
+//; my $fixedHdrLen = $hdrLen != 0;
+//; my $numHdrLenBytes = scalar(@$hdrLenBytes);
+//; if ($fixedHdrLen) {
+//;     # Verify that no bytes are specified for extraction
+//;     if ($numHdrLenBytes != 0) {
+//;         $self->error('Cannot specify both a fixed length and a series of bytes to extract to calculate length');
+//;     }
+//; } else {
+//;     # Verify that bytes are specified for extraction
+//;     # and that they fall within a valid range
+//;     if ($numHdrLenBytes == 0) {
+//;         $self->error('Must specify either a fixed header length or a series of bytes to extract to calculate length');
+//;     }
+//;
+//;     # Verify that the set of header lengths falls within the valid range
+//;     my $cnt = 0;
+//;     foreach my $len (@$hdrLenMap) {
+//;         $self->error("Length map $cnt is missing its match")
+//;             unless defined $len->{match};
+//;         $self->error("Length map $cnt is missing its length")
+//;             unless defined $len->{len};
+//;         $self->error("Length map $cnt (length " . $len->{len} . ") is less than the last byte to extract ($lastExtractByte)")
+//;             unless $len->{len} > $lastExtractByte;
+//;         $cnt++;
+//;     }
+//; }
+//;
+//; # Verify that the next header mapping is valid
+//; my $numNxtHdrBytes = scalar(@$nxtHdrBytes);
+//; my $numNxtHdrs = scalar(@$nxtHdrMap);
+//; my $haveNxtHdrDefault = 0;
+//; my $cnt = 0;
+//; foreach my $nxtHdr (@$nxtHdrMap) {
+//;     $self->error("Next header map $cnt is missing its match")
+//;         unless defined $nxtHdr->{match};
+//;     $self->error("Next header map $cnt is missing its next header")
+//;         unless defined $nxtHdr->{nxt_hdr};
+//;     $self->error("Next header map $cnt is missing its next header length")
+//;         unless defined $nxtHdr->{nxt_hdr_len};
+//;     $haveNxtHdrDefault |= $nxtHdr->{match} eq 'default';
+//;     if ($nxtHdr->{match} =~ /^(\d+)'([bdh])(\?+)$/) {
+//;         my $width = int($1);
+//;         my $type = $2;
+//;         my $matchLen = length($3);
+//;         $width //= 4 if $type eq 'h';
+//;         $width //= 10 if $type eq 'd';
+//;         $haveNxtHdrDefault |= $matchLen >= $width;
+//;         $nxtHdr->{match} = "default";
+//;     }
+//;     $cnt++;
+//; }
+//; if ($numNxtHdrBytes == 0) {
+//;     if ($numNxtHdrs > 1) {
+//;         $self->error("Error: no next header bytes listed but multiple next headers specified");
+//;     } elsif ($numNxtHdrs == 1 && !$haveNxtHdrDefault) {
+//;         $self->error("Error: non-default next header match with no next header bytes listed");
+//;     }
+//; }
+
+import parser_pkg::*;
+
+// Top-level parser
+module `mname()`
+(
+    //; my $ifc = $self->get_parent()->get_param($thisDblWide ? 'IfcDblWidePtr' : 'IfcPtr');
+    `$ifc->mname()`.parser      ifc,
+
+    //Global Signals
+    input logic                 clk,                 // Clock
+    input logic                 rst                  // Reset
+);
+
+
+////////////////////////////////////////
+// Pipe Signals
+////////////////////////////////////////
+
+`$thisDblWide ? "pkt_data_wide_t" : "pkt_data_t"`    pkt;
+assign pkt.bits = ifc.data;
+
+//; # Logic to verify that the double wide signal is asserted when it needs to be
+//; my $checkDblWide = "1";
+//; if ($lastExtractByte + $offset >= $wordByteWidth && $offset != 0) {
+//;     $checkDblWide = "ifc.all_dbl_wide";
+//; }
+//;
+
+////////////////////////////////////////
+// Header length extraction/calculation
+////////////////////////////////////////
+
+//; # Logic to extract header lengths
+//; if (!$fixedHdrLen) {
+logic [0 : `$numHdrLenBytes - 1`][7:0] len_curr;
+logic [0 : `$numHdrLenBytes - 1`][7:0] len_reg;
+
+//;     my $cnt = 0;
+//;     foreach my $lenByte (@$hdrLenBytes) {
+//;         my $byteInFirstDblWord = $thisDblWide && $lenByte < 2 * $wordByteWidth;
+always_ff @(posedge clk or posedge rst)
+    if (rst)
+        len_reg[`$cnt`] <= '0;
+    else if (ifc.hdr_pos == `wordStartPos($lenByte)`)
+        len_reg[`$cnt`] <= pkt.bytes[`$lenByte % $wordByteWidth`];
+//;         if ($byteInFirstDblWord) {
+    else if (ifc.hdr_pos == '0 && ifc.this_dbl_wide)
+        len_reg[`$cnt`] <= pkt.bytes[`$lenByte % (2 * $wordByteWidth)`];
+//;         }
+always_comb
+    if (ifc.hdr_pos == `wordStartPos($lenByte)`)
+        len_curr[`$cnt`] = pkt.bytes[`$lenByte % $wordByteWidth`];
+//;         if ($byteInFirstDblWord) {
+    else if (ifc.hdr_pos == '0 && ifc.this_dbl_wide)
+        len_curr[`$cnt`] = pkt.bytes[`$lenByte % (2 * $wordByteWidth)`];
+//;         }
+    else
+        len_curr[`$cnt`] = len_reg[`$cnt`];
+
+//;         $cnt++;
+//;     }
+wire hdr_len_vld = ifc.data_vld && `genHdrPosCheck($thisDblWide, $lastLenByte)` && `$checkDblWide`;
+
+assign ifc.curr_hdr_info_vld = hdr_len_vld;
+always_comb begin
+    unique casez (len_curr)
+//;     my $seenDefault = 0;
+//;     my $shortest = $hdrLenMap->[0]->{len};
+//;     foreach my $len (@$hdrLenMap) {
+//;         my $matchStr = $len->{match};
+//;         my $matchLen = int($len->{len});
+//;         $seenDefault |= $matchStr eq 'default';
+//;         $shortest = $matchLen if $matchLen < $shortest;
+//;         $matchStr =~ s/\./?/g;
+//;
+//;         printLenCaseBranch($matchStr, $matchLen, $lastExtractByte, $offset, $dblWideEn, $thisDblWide);
+//;     }
+//;     if (!$seenDefault) {
+//;         printLenCaseBranch('default', $shortest, $lastExtractByte, $offset, $dblWideEn, $thisDblWide);
+//;     }
+    endcase
+end
+
+//; # Logic to calculate the header length
+//; } else {
+//;     my ($offsetInc, $offsetIncDW, $posInc, $posIncDW, $shiftAmtInc, $shiftAmtIncDW, $bufRdAmt, $bufRdAmtDW) = calcOffsetsFromLen($hdrLen, $lastExtractByte, $offset, $dblWideEn);
+//;     my $lastWordLen = $hdrLen % $wordByteWidth;
+//;     $lastWordLen = $wordByteWidth if $lastWordLen == 0;
+//;     my $lastWordPos = POSIX::floor(($hdrLen - 1) / $wordByteWidth) * $wordByteWidth;
+assign ifc.curr_hdr_info_vld = '0;
+assign ifc.curr_hdr_len = `fmtWidthVal($hdrLen)`;
+assign ifc.curr_hdr_last_word_len = `fmtWidthVal($lastWordLen)`;
+assign ifc.curr_hdr_last_word_pos = `fmtWidthVal($lastWordPos)`;
+assign ifc.last_word = ifc.data_vld && `genHdrPosCheck($thisDblWide, $lastExtractByte)` && `$checkDblWide`;
+assign ifc.nxt_hdr_proc_pos_inc = ifc.all_dbl_wide ? `fmtWidthVal($posIncDW)` : `fmtWidthVal($posInc)`;
+assign ifc.nxt_hdr_offset_inc = ifc.all_dbl_wide ? `fmtWidthVal($offsetIncDW)` : `fmtWidthVal($offsetInc)`;
+assign ifc.buf_rd_amt = ifc.all_dbl_wide ? `fmtBRAmt($bufRdAmtDW)` : `fmtBRAmt($bufRdAmt)`;
+assign ifc.shift_amt_inc = ifc.all_dbl_wide ? `fmtVal($shiftAmtIncDW, getShiftWidth())` : `fmtVal($shiftAmtInc, getShiftWidth())`;
+//; }
+
+
+////////////////////////////////////////
+// Next header calculation logic
+////////////////////////////////////////
+
+//; # Logic to extract next header byptes
+//; if ($numNxtHdrBytes > 0) {
+logic [0 : `$numNxtHdrBytes - 1`][7:0] nxt_hdr_curr;
+logic [0 : `$numNxtHdrBytes - 1`][7:0] nxt_hdr_reg;
+
+//;     my $cnt = 0;
+//;     foreach my $nxtHdrByte (@$nxtHdrBytes) {
+//;         my $byteInFirstDblWord = $thisDblWide && $nxtHdrByte < 2 * $wordByteWidth;
+always_ff @(posedge clk or posedge rst)
+    if (rst)
+        nxt_hdr_reg[`$cnt`] <= '0;
+    else if (ifc.hdr_pos == `wordStartPos($nxtHdrByte)`)
+        nxt_hdr_reg[`$cnt`] <= pkt.bytes[`$nxtHdrByte % $wordByteWidth`];
+//;         if ($byteInFirstDblWord) {
+    else if (ifc.hdr_pos == '0 && ifc.this_dbl_wide)
+        nxt_hdr_reg[`$cnt`] <= pkt.bytes[`$nxtHdrByte % (2 * $wordByteWidth)`];
+//;         }
+always_comb
+    if (ifc.hdr_pos == `wordStartPos($nxtHdrByte)`)
+        nxt_hdr_curr[`$cnt`] = pkt.bytes[`$nxtHdrByte % $wordByteWidth`];
+//;         if ($byteInFirstDblWord) {
+    else if (ifc.hdr_pos == '0 && ifc.this_dbl_wide)
+        nxt_hdr_curr[`$cnt`] = pkt.bytes[`$nxtHdrByte % (2 * $wordByteWidth)`];
+//;         }
+    else
+        nxt_hdr_curr[`$cnt`] = nxt_hdr_reg[`$cnt`];
+
+//;         $cnt++;
+//;     }
+wire nxt_hdr_vld = ifc.data_vld && `genHdrPosCheck($thisDblWide, $lastNxtHdrByte)` && `$checkDblWide`;
+
+//; # Logic to calculate next header
+assign ifc.nxt_hdr_info_vld = nxt_hdr_vld && ifc.data_vld;
+always_comb begin
+    unique casez (nxt_hdr_curr)
+//; my $cnt = 0;
+//; foreach my $nxtHdr (@$nxtHdrMap) {
+//;     my $matchStr = $nxtHdr->{match};
+//;     my $nxtHdrType = $nxtHdr->{nxt_hdr};
+//;     my $nxtHdrLen = int($nxtHdr->{nxt_hdr_len});
+//;     $matchStr =~ s/\./?/g;
+//;     print "\n" if $cnt > 0;
+        `$matchStr` : begin // `$nxtHdrType`
+            ifc.nxt_hdr_type = `$nxtHdrType`;
+            ifc.nxt_hdr_len = `$nxtHdrLen`;
+        end
+//;     $cnt++;
+//; }
+//; if (!$haveNxtHdrDefault) {
+        default : begin
+            ifc.nxt_hdr_type = UNKNOWN;
+            ifc.nxt_hdr_len = '0;
+        end
+//; }
+    endcase
+end
+
+//; } elsif ($numNxtHdrs > 0) {
+//;     my $nxtHdr = $nxtHdrMap->[0];
+//;     my $matchStr = $nxtHdr->{match};
+//;     my $nxtHdrType = $nxtHdr->{nxt_hdr};
+//;     my $nxtHdrLen = $nxtHdr->{nxt_hdr_len};
+assign ifc.nxt_hdr_info_vld = ifc.data_vld && ifc.hdr_pos == 0;
+assign ifc.nxt_hdr_type = `$nxtHdrType`;
+assign ifc.nxt_hdr_len = `$nxtHdrLen`;
+//; } else {
+assign ifc.nxt_hdr_info_vld = ifc.data_vld && ifc.hdr_pos == 0;
+assign ifc.nxt_hdr_type = UNKNOWN;
+assign ifc.nxt_hdr_len = '0;
+//; }
+
+endmodule : `mname`

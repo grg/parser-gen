@@ -1,0 +1,90 @@
+////////////////////////////////////////////////////////////////
+// parser_pkg.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Common data types, functions, etc
+//
+////////////////////////////////////////////////////////////////
+
+//; use POSIX;
+//; use Parser;
+
+//; # PARAMETERS:
+//; my $wordByteWidth = parameter( name=>'WordWidth', val=>8,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words',
+//;                               min=>1 , max=>128, step=>1);
+//; my $wordBitWidth = 8 * $wordByteWidth;
+
+package `mname`;
+
+////////////////////////////////////////
+// Enums
+////////////////////////////////////////
+
+// Enum of all header types
+//; my @hdrNames = getHeaderNames();
+//; my $numHeaders = numHeaders();
+//; my $totalHeaders = $numHeaders + 1;
+//; my $hdrCntWidth = ceil(log($totalHeaders) / log(2));
+typedef enum logic [ `$hdrCntWidth - 1` : 0] {
+//; print "        UNKNOWN = 0";
+//;
+//; foreach my $hdrName (@hdrNames) {
+//;     my $hdr = getHeader($hdrName);
+//;     print ",\n        " . $hdr->{'enumName'};
+//; }
+//; print "\n";
+    } hdr_t;
+
+localparam FIRST_HDR = `getFirstHdrEnum()`;
+
+
+////////////////////////////////////////
+// Types
+////////////////////////////////////////
+
+typedef union packed {
+    logic [ `$wordBitWidth-1` : 0] bits;
+    logic [0:`$wordByteWidth-1`][7:0] bytes;
+} pkt_data_t;
+
+typedef union packed {
+    logic [ `2*$wordBitWidth-1` : 0] bits;
+    logic [0:`2*$wordByteWidth-1`][7:0] bytes;
+} pkt_data_wide_t;
+
+
+////////////////////////////////////////
+// Functions
+////////////////////////////////////////
+
+function automatic int log2(input int val);
+    log2 = 0;
+    while (2 ** log2 < val)
+        log2++;
+endfunction
+
+function automatic int log2floor(input int val);
+    if (val <= 1)
+        return 1;
+    log2floor = 0;
+    while (val > 1) begin
+        val = val / 2;
+        log2floor++;
+    end
+endfunction
+
+////////////////////////////////////////
+// Constants
+////////////////////////////////////////
+
+//; my ($parsers, $parserSeqs, $wideParsers, $maxLag, $maxLagSeq) = getParserLocs();
+//; my $bufLen = POSIX::ceil($maxLag / $wordByteWidth);
+localparam offsetWidth = `log2($maxLag + 1)`;
+localparam hdrCntWidth = `$hdrCntWidth`;
+
+localparam MAX_HDR_LEN = `getMaxHdrLen()`;
+localparam HDR_WIDTH = `getHdrWidth()`;
+localparam BR_WIDTH = `getBufRdWidth()`;
+
+endpackage : `mname`

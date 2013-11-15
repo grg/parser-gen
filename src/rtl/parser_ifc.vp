@@ -1,0 +1,112 @@
+////////////////////////////////////////////////////////////////
+// parser_ifc.vp
+//    Glen Gibb grg@stanford.edu
+//
+// Description:
+//   Interface for parser submodules
+//
+////////////////////////////////////////////////////////////////
+
+//;# Import Libs
+//; use POSIX ();
+//; use Parser;
+//;
+//  PARAMETERS:
+//; my $wordByteWidth  = parameter( name=>'WordWidth', val=>4 ,
+//;                               doc=>'!FUNCTIONAL! Byte width of parser input words' ,
+//;                               min=>1 , max=>128, step=>1 );
+//; my $wordBitWidth = 8 * $wordByteWidth;
+//; my $dblWide = parameter( name=>'DblWide', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable processing of double-width words',
+//;                               list=>[0, 1]);
+//; my $shiftDblWide = parameter( name=>'ShiftDblWide', val=>0,
+//;                               doc=>'!FUNCTIONAL! Enable processing of double-width words',
+//;                               list=>[0, 1]);
+//; my $widthMult = $dblWide ? 2 : 1;
+//; my $shiftWidth = getShiftWidth();
+
+import parser_pkg::*;
+
+
+// Top-level parser
+interface `mname()`;
+    //Input Signals
+    logic [ `$widthMult * $wordBitWidth - 1` : 0]  data;
+    logic                           data_vld;
+
+    logic [HDR_WIDTH-1:0]           hdr_pos;
+//; if ($dblWide) {
+    logic                           this_dbl_wide;
+//; }
+    logic                           all_dbl_wide;
+
+    //Output Signals
+
+    // Signals decribing the subsequent header
+    logic                           nxt_hdr_info_vld;
+    hdr_t                           nxt_hdr_type;
+    logic [HDR_WIDTH-1:0]           nxt_hdr_len;
+    logic [HDR_WIDTH-1:0]           nxt_hdr_proc_pos_inc;
+    logic [HDR_WIDTH-1:0]           nxt_hdr_offset_inc;
+
+    logic signed [BR_WIDTH-1:0]     buf_rd_amt;
+    logic [`$shiftWidth-1`:0]       shift_amt_inc;
+
+    // Signals decribing the current header
+    logic                           curr_hdr_info_vld;
+    logic [HDR_WIDTH-1:0]           curr_hdr_len;
+    logic [HDR_WIDTH-1:0]           curr_hdr_last_word_len;
+    logic [HDR_WIDTH-1:0]           curr_hdr_last_word_pos;
+
+    logic                           last_word;
+
+    // parser modport -- connect to the parser processing
+    // data and generating current/next state signals
+    modport parser (
+        input data,
+        input data_vld,
+
+        input hdr_pos,
+//; if ($dblWide) {
+        input this_dbl_wide,
+//; }
+        input all_dbl_wide,
+
+        output nxt_hdr_info_vld,
+        output nxt_hdr_type,
+        output nxt_hdr_len,
+        output nxt_hdr_proc_pos_inc,
+        output nxt_hdr_offset_inc,
+
+        output buf_rd_amt,
+        output shift_amt_inc,
+
+        output curr_hdr_info_vld,
+        output curr_hdr_len,
+        output curr_hdr_last_word_len,
+        output curr_hdr_last_word_pos,
+
+        output last_word
+    );
+
+    // observer modport -- connect to anything that wants
+    // to observe a parser output
+    modport observer (
+        input nxt_hdr_info_vld,
+        input nxt_hdr_type,
+        input nxt_hdr_len,
+        input nxt_hdr_proc_pos_inc,
+        input nxt_hdr_offset_inc,
+
+        input buf_rd_amt,
+        input shift_amt_inc,
+
+        input curr_hdr_info_vld,
+        input curr_hdr_len,
+        input curr_hdr_last_word_len,
+        input curr_hdr_last_word_pos,
+
+        input last_word
+    );
+
+endinterface : `mname()`

@@ -1,0 +1,88 @@
+#
+# Enterprise edge parse graph (see paper)
+#
+
+ethernet {
+	fields {
+		dstAddr : 48 : extract,
+		srcAddr : 48 : extract,
+		etherType : 16 : extract,
+	}
+	next_header = map(etherType) {
+		0x8847, 0x8848 : mpls,
+		0x0800 : ipv4,
+		0x86dd : ipv6,
+	}
+	# This is some test code
+}
+
+ethernet2 {
+	fields {
+		dstAddr : 48 : extract,
+		srcAddr : 48 : extract,
+		etherType : 16 : extract,
+	}
+}
+
+mpls {
+	fields {
+		label : 20 : extract,
+		tc : 3 : extract,
+		bos : 1 : extract,
+		ttl : 8 : extract,
+	}
+	pseudo-fields {
+		next-header : 4,
+	}
+	next_header = map(bos, next-header) {
+		b0xxxx : mpls,
+		b10000 : eompls,
+		b10100 : ipv4,
+		b10110 : ipv6,
+	}
+	next_header_def = b10001
+	max = 2
+	length = 32
+}
+
+ipv4 {
+	fields {
+		version : 4,
+		ihl : 4,
+		diffserv : 8 : extract,
+		totalLen : 16,
+		identification : 16,
+		flags : 3 : extract,
+		fragOffset : 13,
+		ttl : 8 : extract,
+		protocol : 8 : extract,
+		hdrChecksum : 16,
+		srcAddr : 32 : extract,
+		dstAddr : 32 : extract,
+		options : *,
+	}
+	length = ihl * 4 * 8
+	max_length = 256
+}
+
+ipv6 {
+	fields {
+		version : 4,
+		trafficClass : 8 : extract,
+		flowLabel : 20 : extract,
+		payloadLen : 16,
+		nextHdr : 8 : extract,
+		hopLimit : 8,
+		srcAddr : 128 : extract,
+		dstAddr : 128 : extract,
+	}
+}
+
+eompls {
+	fields {
+		zero : 4,
+		reserved : 12,
+		seqNo : 16,
+	}
+	next_header = ethernet2
+}
