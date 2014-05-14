@@ -6,7 +6,7 @@
 PARSER_GEN=
 
 if [ "$PARSER_GEN" == "" ] ; then
-	echo $0: Error: please edit the script and set PARSER_GEN
+	echo $BASH_SOURCE: Error: please edit the script and set PARSER_GEN
 fi
 
 # Set the project Perl path
