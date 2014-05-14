@@ -1,4 +1,6 @@
 # Bourne shell script to initialize the environment for the packet generator
+#
+# Note: this script must be loaded using source. e.g.: "source env_setup.sh"
 
 # Variable that points at the top-level parser generator directory
 PARSER_GEN=
