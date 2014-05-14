@@ -3,7 +3,7 @@
 # Note: this script must be loaded using source. e.g.: "source env_setup.sh"
 
 # Variable that points at the top-level parser generator directory
-PARSER_GEN=
+#PARSER_GEN=
 
 if [ "$PARSER_GEN" == "" ] ; then
 	echo $BASH_SOURCE: Error: please edit the script and set PARSER_GEN
