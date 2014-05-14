@@ -3,7 +3,7 @@
 # Variable that points at the top-level parser generator directory
 PARSER_GEN=
 
-if [ "$PARSER_GEN" -eq "" ] ; then
+if [ "$PARSER_GEN" == "" ] ; then
 	echo $0: Error: please edit the script and set PARSER_GEN
 fi
 
