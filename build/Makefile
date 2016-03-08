@@ -154,14 +154,14 @@ GENESIS_INC := 	-incpath $(SRC_DIR)/rtl			\
 		-incpath $(SRC_DIR)/verif
 
 # list src folders and include folders for Makefile to find (I hate duplicates!!!)
-vpath %.vp $(GENESIS_SRC)
+vpath %.svp $(GENESIS_SRC)
 vpath %.vph $(GENESIS_INC)
 
 # List source files
-GENESIS_ENV :=		$(notdir $(wildcard $(SRC_DIR)/verif/*.vp))
+GENESIS_ENV :=		$(notdir $(wildcard $(SRC_DIR)/verif/*.svp))
 
-GENESIS_DESIGN := 	$(notdir $(wildcard $(SRC_DIR)/rtl/*.vp)) \
-			$(notdir $(wildcard $(SRC_DIR)/rtl-old/*.vp))
+GENESIS_DESIGN := 	$(notdir $(wildcard $(SRC_DIR)/rtl/*.svp)) \
+			$(notdir $(wildcard $(SRC_DIR)/rtl-old/*.svp))
 
 GENESIS_INPUTS :=	$(GENESIS_ENV) $(GENESIS_DESIGN) 
 
@@ -365,7 +365,7 @@ $(PARSE_GRAPH_TCAM): $(PARSE_GRAPH)
 #####################
 # Genesis2 Generate:
 # This is the rule to activate Genesis2 generator to generate verilog 
-# files (_unqN.v) from the generator program (.vp files).
+# files (_unqN.v) from the generator program (.svp files).
 # Use "make PARSE=<genesis2_parse_flags> GEN=<genesis2_gen_flags>" to add elaboration time flags
 LOG_GEN := 2>&1 | tee --append gen2.log ; perl $(PROJ_HOME)/bin/checkRun.pl gen2.log
 ifneq ($(GENESIS_PROJECT_LIBS),)
