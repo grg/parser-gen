@@ -352,7 +352,7 @@ def getHeaderBNF():
         map_start = Suppress('map') + LPAREN + from_header('from_header') + RPAREN
         map_body = LBRACE + Optional(mapList('maplist')) + RBRACE
         mapTable = Group(map_start + map_body)
-        next_header = Suppress('next_header') + EQ + (mapTable('mapping') ^ identifier('field'))
+        next_header = Suppress('next_header') + EQ + (mapTable('nh_mapping') ^ identifier('nh_field'))
         next_header_def = Suppress('next_header_def') + EQ + identifier
 
         max_var = Suppress('max_var') + EQ + identifier
@@ -417,14 +417,14 @@ def readHeaders(filename):
                     hdr.addPseudofield(name, width)
 
             if item.next_header != '':
-                if item.next_header.field != '':
-                    hdr.setNextHeader(str(item.next_header.field))
+                if item.nh_field != '':
+                    hdr.setNextHeader(str(item.nh_field))
                 else:
-                    from_fields = item.next_header.mapping.from_header.asList()
+                    from_fields = item.nh_mapping.from_header.asList()
                     rangeCount = 0
                     widths = hdr.getFieldWidths(from_fields)
                     hdrMap = {}
-                    for (keys, value) in item.next_header.mapping.maplist:
+                    for (keys, value) in item.nh_mapping.maplist:
                         for key in keys:
                             if key.find('0x') == 0:
                                 key = int(key, 16)
@@ -459,9 +459,9 @@ def readHeaders(filename):
                     hdr.setNextHeader((from_fields, hdrList))
 
             if item.next_header_def != '':
-                if item.next_header == '' or item.next_header.field != '':
+                if item.next_header == '' or item.nh_field != '':
                     raise Exception("next_header_def value specified but next_header is not specified/is not a map")
-                from_fields = item.next_header.mapping.from_header.asList()
+                from_fields = item.nh_mapping.from_header.asList()
                 (mask, data) = crackKey(hdr, item.next_header_def[0], from_fields)
                 hdr.setDefNxtHdrVal((mask, data))
 
